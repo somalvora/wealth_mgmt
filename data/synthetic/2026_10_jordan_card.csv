@@ -1,0 +1,16 @@
+# format: hh_statement_csv_v1
+# household_id: hh_demo
+# account_id: acct_jordan_card
+# currency: USD
+# period_start: 2026-10-01
+# period_end: 2026-10-31
+# opening_balance: -820.00
+# closing_balance: -248.18
+# total_credits: 820.00
+# total_debits: 248.18
+date,description,amount
+2026-10-02,STREAMCO MONTHLY,-12.99
+2026-10-07,SAFEWAY #0457,-96.10
+2026-10-07,SAFEWAY #0457,-96.10
+2026-10-15,CARD PAYMENT THANK YOU,820.00
+2026-10-21,NOVAPIXEL DIGITAL,-42.99

@@ -1,0 +1,15 @@
+# format: hh_statement_csv_v1
+# household_id: hh_demo
+# account_id: acct_rental_checking
+# currency: USD
+# period_start: 2025-10-01
+# period_end: 2025-10-31
+# opening_balance: 15000.00
+# closing_balance: 14545.00
+# total_credits: 3100.00
+# total_debits: 3555.00
+date,description,amount
+2025-10-01,RENT DEPOSIT UNIT B,3100.00
+2025-10-05,MAPLE ST HOA DUES,-425.00
+2025-10-12,BAYSIDE PLUMBING INV 2231,-380.00
+2025-10-18,SAN MATEO TAX COLLECTOR - SECURED PROPERTY TAX - UNIT B,-2750.00
