@@ -1,0 +1,17 @@
+# format: hh_statement_csv_v1
+# household_id: hh_demo
+# account_id: acct_alex_checking
+# currency: USD
+# period_start: 2026-10-01
+# period_end: 2026-10-31
+# opening_balance: 9200.00
+# closing_balance: 13408.03
+# total_credits: 8200.00
+# total_debits: 3991.97
+date,description,amount
+2026-10-01,SUMMIT MORTGAGE PMT,-3450.00
+2026-10-03,PAYROLL ACME CORP,4100.00
+2026-10-11,PG&E ENERGY BILL,-212.37
+2026-10-14,SAFEWAY #1182,-186.52
+2026-10-17,PAYROLL ACME CORP,4100.00
+2026-10-28,SAFEWAY #1182,-143.08

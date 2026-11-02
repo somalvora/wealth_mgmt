@@ -1,0 +1,13 @@
+# format: hh_statement_csv_v1
+# household_id: hh_demo
+# account_id: acct_alex_checking
+# currency: USD
+# period_start: 2026-09-01
+# period_end: 2026-09-30
+# opening_balance: 8000.00
+# closing_balance: 9999.99
+# total_credits: 4100.00
+# total_debits: 3450.00
+date,description,amount
+2026-09-03,PAYROLL ACME CORP,4100.00
+2026-09-10,SUMMIT MORTGAGE PMT,-3450.00
