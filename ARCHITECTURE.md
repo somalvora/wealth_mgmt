@@ -19,6 +19,9 @@ This file describes the architecture as it exists in code. It tracks
  │  LedgerStore.query_transactions ─► CalculationRunner.run ─► household_finance.calcs    │
  │                                          │                                              │
  │                                          └─► calculation_runs + audit_events (SQLite)   │
+ │                                                                                        │
+ │  planning.plan_allocation (ToT beam search) ─► household_finance.allocation            │
+ │    ThoughtGenerator (template personas) ─► expand / validate / rollout / score         │
  └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,6 +42,8 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.ledger` | Append-only `LedgerStore` | 6 | `query_ledger` |
 | `household_agent.calc_runner` | Allowlist, eligibility, provenance | 3.2, 3.4 | `run_calculation` |
 | `household_agent.pipeline` | Orchestrates ingest end to end | 12 | — |
+| `household_finance.allocation` | Strategy → cents expansion, hard constraints, composite score, rollout | 3.4, 5.8 | `evaluate_allocation_candidates` |
+| `household_agent.planning` | Tree-of-Thought beam search, `ThoughtGenerator` and `Critic` protocols, template personas | 5.8 | (Supervisor planning subgraph) |
 
 ## 3. Data flow: ingesting a statement
 
@@ -74,6 +79,42 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
    - **Eligibility.** It rejects any `unreconciled` input. Provisional input is accepted only with `allow_provisional=True`, and the result is then flagged `provisional`.
    - **Recording.** It calls the pure function and stores a `calculation_runs` row with the canonical-JSON `input_hash` and `output_hash` and `household_finance.__version__`, then appends a `calculate` audit event.
 3. **Explain** (Phase 2). The agent quotes `output` and cites `run_id` plus each input's `source_locator` (for example `line=15`).
+
+## 4a. Data flow: Tree-of-Thought capital allocation (`plan_allocation`)
+
+```
+PlanningInputs (reconciled cash, essential outflow, liabilities, verified room, assumptions)
+   │  surplus = cash − 6×monthly essentials − near-term liabilities   (≤ 0 → not_eligible)
+   ▼
+root ──propose(tier 1)──► 3 thoughts ──expand_step → validate → rollout → score──► keep top 2
+         propose(tier 2) on each of 2 ──► 6 children ─────────────────────────────► keep top 2
+         propose(tier 3) on each of 2 ──► 6 leaves (always allocate everything left) ─► rank
+   ▼
+PlanResult(status=awaiting_approval | needs_review | no_compliant_plan | not_eligible,
+           best, ranked_leaves, trace[15 nodes], input_hash, versions, requires_approval=True)
+```
+
+**Thoughts and budget.**
+
+- A `Thought` carries an `AllocationStep(tier, fraction, buckets, mode)` and a rationale, never an amount. `expand_step` converts it to cents:
+  - `split` uses largest-remainder apportionment, so the parts sum exactly;
+  - `fill_in_order` fills buckets in priority order up to each bucket's verified room.
+- Each run makes 3 + 6 + 6 = 15 node evaluations. If the critic retains discrepancy branches (at most 2 extra per depth), the worst case is 27.
+
+**Scoring and pruning.**
+
+- `score_allocation` = 0.40·tax_efficiency + 0.35·liquidity_safety + 0.25·expected_net_yield, quantized to 4 decimal places.
+- **Intermediate nodes are scored by rollout**: undecided tiers are filled with the Balanced default, so a depth-1 node isn't penalized for tax room it hasn't decided yet.
+- **Hard prune** (score 0) on any of: `statutory_cap_exceeded`, `limit_unverified`, `liquidity_floor_breached`, `unallocated_surplus` (at leaves), `bucket_not_in_tier`, `wrong_tier`.
+- **Soft prune** below 0.65.
+- **Beam selection** is iterative: among nodes within 0.02 of the current best, the highest liquidity wins, then the higher composite, then the node ID.
+
+**Critic** (optional, advisory).
+
+- If |critic − composite| > 0.20, the node is flagged and retained even if it would have been cut, up to 2 per depth.
+- Any flag sets the status to `needs_review`. The critic can never prune a branch.
+
+**Generators.** `TemplateThoughtGenerator` produces fixed Conservative, Balanced and Tax-Aggressive strategies for Phase 1. Phase 2 swaps in LLM persona nodes behind the same protocol, and anything they propose still passes through the same validator.
 
 ## 5. Storage schema (SQLite)
 
@@ -115,6 +156,10 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Silent edits | Append-only triggers, versioned corrections | `ledger.py` |
 | Cross-member leak | Deny-by-default and all-owner consent | `authz.py` |
 | Untraceable actions | Hash-chained audit log, `verify()` | `audit.py` |
+| LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step` | `allocation.py` |
+| Plan breaks caps or reserve | Hard prune before scoring; leaves must allocate exactly the surplus | `allocation.py`, `planning.py` |
+| Critic prunes a good branch | Critic is advisory; disagreement > 0.20 retains the branch for review | `planning.py` |
+| Plan treated as an action | `requires_approval=True`; there is no execution path | `planning.py` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
@@ -130,3 +175,10 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 - **Retrieval.** A ChromaDB index of verified documents, using 500/100 chunking and `nomic-embed-text`. Every retrieval is filtered by the authorizer.
 - **MCP.** A `household-finance-tools` stdio MCP server exposes the Phase 1 functions, consumed through `langchain-mcp-adapters`.
 - **Models.** Local Ollama models: `qwen2.5:7b` as the baseline, with `qwen3:8b` for comparison.
+- **Planner (§5.8).**
+  - Wrap `plan_allocation` as a Supervisor subgraph whose three persona prompts emit `pydantic`-validated `AllocationStep`s. CrewAI is not used.
+  - Evaluate each depth in one batched `evaluate_allocation_candidates` call.
+  - Fetch contribution limits once per job via `retrieve_verified`.
+  - Derive `PlanningInputs` from reconciled ledger balances.
+  - Record each run in `calculation_runs`, then `interrupt()` for approval.
+  - Target p95 ≤ 120 s on the local 7B model, at most 5 generation calls.

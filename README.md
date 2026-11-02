@@ -9,7 +9,7 @@ The design is the single source of truth:
 
 | Phase | Scope (design §12) | State |
 |---|---|---|
-| 1 | Steps 1–5 below | **Done**: 59 tests passing |
+| 1 | Steps 1–6 below | **Done**: 76 tests passing |
 | 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | Not started |
 | 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | Not started |
 
@@ -20,6 +20,10 @@ What's in Phase 1:
 3. **Reconciliation**. Each statement is checked for balance continuity, period bounds, matching totals and duplicates. It then gets one of three states, `reconciled` / `qualified` / `unreconciled`, plus a weighted `document_confidence` score.
 4. **Ledger, privacy and audit**. The SQLite ledger is append-only. Corrections are added as new versions instead of overwriting old rows. Authorization is deny-by-default and requires per-owner consent; joint accounts need consent from every owner. The audit log is hash-chained and tamper-evident.
 5. **Calculation runner**. Only allowlisted calculations can run. Unreconciled data can never be used. Provisional data is used only when the caller explicitly opts in. Every run records input and output hashes so it can be reproduced.
+6. **Tree-of-Thought capital-allocation planner** (design §5.8). It splits a surplus across three tiers: a cash buffer, then tax-advantaged accounts, then growth or debt prepayment.
+   - The search is a beam search (b=3 personas, k=2, depth 3): 15 node evaluations per run.
+   - Thoughts are *strategies*. The finance library turns them into cents, enforces caps and the reserve floor, and scores them (0.40 tax, 0.35 liquidity, 0.25 yield).
+   - The result is an approval-gated scenario; nothing moves money.
 
 ## Quick start
 
@@ -38,7 +42,8 @@ The demo walks through five steps:
 2. **Compares the October property tax year over year.** It went from $2,750.00 to $3,200.00, a rise of **$450.00 (16.36%)**. The result comes with a calculation `run_id` and an input hash.
 3. **Blocks a cross-member read.** Jordan tries to read Alex's private checking account and is refused for lack of consent.
 4. **Excludes the corrupt statement.** No rows from the corrupt September statement reach calculations.
-5. **Verifies the audit chain.** Every allow or deny decision is in it.
+5. **Plans a capital allocation.** The household has a **$20,800 surplus** above a $45,200 reserve (six months of essentials plus the next property-tax installment). The planner evaluates 15 nodes and picks *balanced buffer → fill tax room → brokerage*. Within the 0.02 tie margin it prefers this plan over the slightly higher-scoring all-aggressive plan because it keeps more liquidity. It then stops at `awaiting_approval`.
+6. **Verifies the audit chain.** Every allow or deny decision is in it.
 
 ## Project layout
 
@@ -47,6 +52,7 @@ src/household_finance/     Pure, deterministic finance library (no I/O)
   money.py                 to_minor / format_minor / percent — integer cents
   calcs.py                 cash_flow, category_totals, variance, recurring_drift,
                            net_worth_snapshot, amortization_schedule
+  allocation.py            expand_step / validate_allocation / score_allocation / rollout
 src/household_agent/       Agent foundation (agents arrive in Phase 2)
   models.py                Account, Transaction, enums (roles, actions, status)
   authz.py                 Deny-by-default authorizer + consent grants
@@ -57,6 +63,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   ledger.py                Append-only SQLite ledger (LedgerStore)
   calc_runner.py           Allowlisted calculation runner with provenance
   pipeline.py              parse → categorize → reconcile → persist
+  planning.py              Tree-of-Thought beam-search planner (template generator)
   synthetic.py             Demo household, accounts, rules, statements
   demo.py                  `python -m household_agent.demo`
 scripts/                   generate_synthetic_data.py
@@ -95,6 +102,10 @@ These parts of the design are not implemented yet:
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
 - **Agents and orchestration.** The LangGraph agents, checkpointer/interrupts, ChromaDB retrieval and the MCP server are planned for Phase 2.
 - **Consent management.** Consent grants live in memory and are not persisted.
+- **Planner inputs.**
+  - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
+  - Planning inputs are not yet derived from the ledger, and planner runs are not yet stored as `calculation_runs`.
+  - The LLM persona generator and the critic arrive in Phase 2.
 
 ## Data policy
 

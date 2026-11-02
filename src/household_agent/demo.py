@@ -15,6 +15,8 @@ from household_agent.calc_runner import CalculationRunner
 from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
 from household_agent.pipeline import ingest_statement
+from household_agent.planning import plan_allocation
+from household_agent.synthetic import demo_planning_inputs
 from household_agent.synthetic import (
     ACCOUNTS, ALEX, DEMO_AS_OF, DEMO_OCTOBERS, HOUSEHOLD, JORDAN, RULES, demo_statements,
 )
@@ -62,7 +64,19 @@ def main() -> None:
                                     date(2026, 9, 1), date(2026, 9, 30), include_provisional=True, at=DEMO_AS_OF)
     print(f"   September transactions available to calculations: {len(sept)}")
 
-    print(f"\n5. Audit chain verified: {store.audit.verify()} events, correlation_id={corr}")
+    print("\n5. Tree-of-Thought capital allocation (design §5.8; synthetic limits, scenario only)")
+    inputs = demo_planning_inputs()
+    plan = plan_allocation(inputs)
+    print(f"   surplus={format_minor(inputs.surplus_minor)} above required reserve {format_minor(inputs.required_reserve_minor)}")
+    print(f"   beam search b=3 k=2 depth=3: {plan.evaluations} nodes evaluated, "
+          f"{sum(n.status in ('beam_cut', 'soft_pruned', 'hard_pruned') for n in plan.trace)} pruned")
+    for leaf in plan.ranked_leaves[:3]:
+        print(f"   {leaf.node_id:50} score={leaf.score.composite} liquidity={leaf.score.liquidity_safety}")
+    best = plan.best
+    print(f"   chosen: {best.node_id} -> " + ", ".join(f"{b}={format_minor(a)}" for b, a in best.allocation.items()))
+    print(f"   status={plan.status} (interrupt for household approval; no money moves)")
+
+    print(f"\n6. Audit chain verified: {store.audit.verify()} events, correlation_id={corr}")
 
 
 if __name__ == "__main__":
