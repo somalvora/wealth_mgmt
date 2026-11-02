@@ -155,3 +155,27 @@ def write_demo_statements(directory: Path) -> list[Path]:
 
 DEMO_AS_OF = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 DEMO_OCTOBERS = (date(2025, 10, 1), date(2026, 10, 31))
+
+
+def demo_planning_inputs():
+    """Synthetic inputs for the §5.8 capital-allocation planner. Contribution room values are
+    SYNTHETIC placeholders, not IRS limits; a real run takes them from Tier-1 retrieval."""
+    from decimal import Decimal
+
+    from household_finance.allocation import PlanningInputs
+
+    return PlanningInputs(
+        liquid_cash_minor=to_minor("66000.00"),
+        monthly_essential_outflow_minor=to_minor("7000.00"),
+        near_term_liabilities_minor=to_minor("3200.00"),  # next Unit B property-tax installment
+        contribution_room_minor={"hsa": to_minor("4000.00"), "ira": to_minor("7000.00"), "plan_529": to_minor("5000.00")},
+        limits_evidence_id="SYNTHETIC_limits_2026",
+        real_return={
+            "liquidity_buffer": Decimal("0.005"),
+            "hsa": Decimal("0.045"),
+            "ira": Decimal("0.045"),
+            "plan_529": Decimal("0.045"),
+            "brokerage": Decimal("0.045"),
+            "debt_prepayment": Decimal("0.030"),
+        },
+    )
