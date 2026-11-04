@@ -70,6 +70,10 @@ class Authorizer:
     def account(self, account_id: str) -> Account | None:
         return self._accounts.get(account_id)
 
+    def accounts(self, household_id: str) -> list[Account]:
+        return sorted((a for a in self._accounts.values() if a.household_id == household_id),
+                      key=lambda a: a.account_id)
+
     def add_grant(self, grant: ConsentGrant) -> None:
         self._grants[grant.grant_id] = grant
 
