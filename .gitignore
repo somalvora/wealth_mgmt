@@ -11,3 +11,4 @@ build/
 .claude/progress.json
 .env
 .cache/
+runs/

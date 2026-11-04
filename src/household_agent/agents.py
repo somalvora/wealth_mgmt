@@ -130,7 +130,10 @@ ROUTER_PROMPT = (
 )
 LEDGER_PROMPT = (
     "You are the Ledger Analyst. Use query_ledger to find transactions and run_calculation for every "
-    "number; never do arithmetic yourself. Do not interpret tax or policy treatment. " + _JSON_RULE
+    "number; never do arithmetic yourself. Do not interpret tax or policy treatment. Your tool budget is "
+    "small (tool_budget in the task): filter query_ledger by merchant and by the months the task names "
+    "rather than widening the date range and repeating it, then pass the transaction IDs you found to "
+    "run_calculation. Call list_accounts only if the task names no account. " + _JSON_RULE
 )
 POLICY_PROMPT = (
     "You are the Policy & Compliance agent. Use retrieve_verified to find sources and cite chunk IDs. "
@@ -228,7 +231,8 @@ def run_react(model: BaseChatModel, system: str, assignment: TaskAssignment, too
                             ["tools", END])
     g.add_conditional_edges("tools", lambda s: END if s.get("status") else "agent", ["agent", END])
     graph = g.compile()
-    first = HumanMessage(json.dumps({"task": assignment.task, "inputs": assignment.inputs}, default=str))
+    first = HumanMessage(json.dumps({"task": assignment.task, "inputs": assignment.inputs,
+                                     "tool_budget": budget.max_tool_calls}, default=str))
     # Each model turn is followed by at most one tool step, so this bounds the whole loop.
     return graph.invoke({"messages": [SystemMessage(system), first], "calls": 0, "errors": {}, "observations": []},
                         {"recursion_limit": 4 * budget.max_tool_calls + 6})

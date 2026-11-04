@@ -255,7 +255,7 @@ request ─► classify (Router: model JSON → RoutingDecision, else rule_route
         AgentResult(status, outputs, evidence_ids, claims, questions, errors)
 ```
 
-- **Ledger Analyst.** Its tools are `list_accounts`, `query_ledger` and `run_calculation`, through a `ToolSession`. Claims may cite only the transaction IDs and calculation run IDs from this assignment, and `*_minor` values are also matched in dollar form ("$450.00").
+- **Ledger Analyst.** Its tools are `list_accounts`, `query_ledger` and `run_calculation`, through a `ToolSession`. The first message gives the model its `tool_budget`, and the prompt tells it to filter by merchant and month rather than widening and repeating queries (the first live Gemini run used up its budget that way). Claims may cite only the transaction IDs and calculation run IDs from this assignment, and `*_minor` values are also matched in dollar form ("$450.00").
 - **Policy & Compliance.** Its tool is `retrieve_verified`, allowing 1 search plus 2 refinements. Claims are validated against the passages from this assignment and against calculation outputs the Supervisor passed in as run IDs. `rephrase_as_question` verdicts become questions; `remove` verdicts are dropped and recorded as errors.
 - **Supervisor.**
   - It never calls the ledger or the vector store.
