@@ -156,6 +156,22 @@ def test_ledger_claim_with_invented_number_is_removed(seeded_store, categorizer)
     assert r.outputs["dollar_variance_minor"] == 45000  # the real number survives
 
 
+def test_ledger_claim_citing_only_the_run_can_use_its_input_dates(seeded_store, categorizer):
+    steps = [*ledger_script()[:2], lambda m: final({
+        "text": "The October 2026 payment is $450 (16.36%) higher than October 2025.",
+        "evidence_ids": [tool_results(m, "run_calculation")[-1]["run_id"]]})]
+    r = _ledger(seeded_store, categorizer, steps)(assignment())
+    assert r.status == "completed" and len(r.claims) == 1
+
+
+def test_ledger_run_inputs_do_not_vouch_for_other_years(seeded_store, categorizer):
+    steps = [*ledger_script()[:2], lambda m: final({
+        "text": "The October 2026 payment is $450 higher than October 2024.",
+        "evidence_ids": [tool_results(m, "run_calculation")[-1]["run_id"]]})]
+    r = _ledger(seeded_store, categorizer, steps)(assignment())
+    assert r.claims == [] and any("2024" in e for e in r.errors)
+
+
 def test_ledger_claim_citing_unknown_evidence_is_removed(seeded_store, categorizer):
     steps = [*ledger_script()[:2], final({"text": "Property tax rose.", "evidence_ids": ["calc_run_made_up"]})]
     r = _ledger(seeded_store, categorizer, steps)(assignment())
@@ -168,12 +184,14 @@ def test_ledger_tool_budget(seeded_store, categorizer):
     assert any("budget_exhausted" in e for e in r.errors)
 
 
-def test_ledger_model_is_told_its_tool_budget(seeded_store, categorizer):
+def test_ledger_model_is_told_its_tool_budget_and_today(seeded_store, categorizer):
     seen = []
     steps = [lambda msgs: seen.append(msgs) or final()]
     _ledger(seeded_store, categorizer, steps)(assignment(budget=Budget(max_tool_calls=4)))
     system, task = seen[0][0].content, json.loads(seen[0][1].content)
     assert task["tool_budget"] == 4 and "tool_budget" in system and "merchant" in system
+    assert task["today"] == DEMO_AS_OF.date().isoformat() and "relative to today" in system
+    assert "must cite the run_id" in system
 
 
 def test_ledger_retry_limit_per_tool(seeded_store, categorizer):
@@ -207,6 +225,14 @@ def test_policy_query_refinement_limit(retrieval):
     r = PolicyCompliance(Scripted(steps=steps), retrieval, ALEX, clock=lambda: DEMO_AS_OF)(
         assignment("policy_compliance"))
     assert any("query refinements" in e for e in r.errors)
+
+
+def test_policy_model_is_told_today_from_its_clock(retrieval):
+    seen = []
+    later = DEMO_AS_OF + timedelta(days=400)
+    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, ALEX,
+                     clock=lambda: later)(assignment("policy_compliance"))
+    assert json.loads(seen[0][1].content)["today"] == later.date().isoformat()
 
 
 def test_policy_tax_claim_without_current_tier1_becomes_question(retrieval):

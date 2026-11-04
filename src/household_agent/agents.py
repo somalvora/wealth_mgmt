@@ -24,7 +24,7 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -132,8 +132,10 @@ LEDGER_PROMPT = (
     "You are the Ledger Analyst. Use query_ledger to find transactions and run_calculation for every "
     "number; never do arithmetic yourself. Do not interpret tax or policy treatment. Your tool budget is "
     "small (tool_budget in the task): filter query_ledger by merchant and by the months the task names "
-    "rather than widening the date range and repeating it, then pass the transaction IDs you found to "
-    "run_calculation. Call list_accounts only if the task names no account. " + _JSON_RULE
+    "(a month or 'last year' without a year is relative to today in the task) rather than widening the "
+    "date range and repeating it, then pass the transaction IDs you found to run_calculation. Call "
+    "list_accounts only if the task names no account. A claim with a computed number (a difference, "
+    "percentage or total) must cite the run_id from run_calculation, not just the transactions. " + _JSON_RULE
 )
 POLICY_PROMPT = (
     "You are the Policy & Compliance agent. Use retrieve_verified to find sources and cite chunk IDs. "
@@ -187,8 +189,12 @@ def _bind(model: BaseChatModel, tools: list[dict[str, Any]]):
 
 
 def run_react(model: BaseChatModel, system: str, assignment: TaskAssignment, tools: list[dict[str, Any]],
-              call_tool: ToolFn) -> _LoopState:
-    """Run one assignment as a LangGraph ReAct loop with the assignment's budget."""
+              call_tool: ToolFn, today: date) -> _LoopState:
+    """Run one assignment as a LangGraph ReAct loop with the assignment's budget.
+
+    ``today`` goes into the first message: without it a model resolves "October" or "last year"
+    from its training date, not the household's.
+    """
     allowed = {t["function"]["name"] for t in tools}
     bound = _bind(model, tools)
     budget = assignment.budget
@@ -231,7 +237,7 @@ def run_react(model: BaseChatModel, system: str, assignment: TaskAssignment, too
                             ["tools", END])
     g.add_conditional_edges("tools", lambda s: END if s.get("status") else "agent", ["agent", END])
     graph = g.compile()
-    first = HumanMessage(json.dumps({"task": assignment.task, "inputs": assignment.inputs,
+    first = HumanMessage(json.dumps({"task": assignment.task, "inputs": assignment.inputs, "today": today,
                                      "tool_budget": budget.max_tool_calls}, default=str))
     # Each model turn is followed by at most one tool step, so this bounds the whole loop.
     return graph.invoke({"messages": [SystemMessage(system), first], "calls": 0, "errors": {}, "observations": []},
@@ -287,7 +293,7 @@ class LedgerAnalyst:
     def __call__(self, a: TaskAssignment) -> AgentResult:
         session = ToolSession(self.store, self.categorizer, self.actor, a.purpose, a.correlation_id,
                               acting_agent=self.name, clock=self.clock)
-        loop = run_react(self.model, LEDGER_PROMPT, a, LEDGER_TOOLS, session.call)
+        loop = run_react(self.model, LEDGER_PROMPT, a, LEDGER_TOOLS, session.call, self.clock().date())
         evidence: dict[str, Any] = {}
         outputs: dict[str, Any] = {}
         for o in loop["observations"]:
@@ -297,7 +303,9 @@ class LedgerAnalyst:
             if o["tool"] == "query_ledger":
                 evidence.update({t["transaction_id"]: _with_money(t) for t in r["transactions"]})
             elif o["tool"] == "run_calculation":
-                evidence[r["run_id"]] = _with_money(r["output"])
+                # a run's inputs are its provenance, so "October 2025" in a claim citing it is supported
+                evidence[r["run_id"]] = {**_with_money(r["output"]),
+                                         "inputs": [evidence[i] for i in r["input_ids"] if i in evidence]}
                 outputs = {**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"]}
         claims, parse_error = parse_final(loop)
         verdicts = validate_claims([Claim(c.text, "calculated", calc_run_ids=tuple(c.evidence_ids)) for c in claims],
@@ -344,7 +352,7 @@ class PolicyCompliance:
                  "effective_tax_year": p["metadata"]["effective_tax_year"] or None}
                 for p in out["passages"]]}
 
-        loop = run_react(self.model, POLICY_PROMPT, a, POLICY_TOOLS, call_tool)
+        loop = run_react(self.model, POLICY_PROMPT, a, POLICY_TOOLS, call_tool, self.clock().date())
         claims, parse_error = parse_final(loop)
         calc_outputs = {k: _with_money(v) for k, v in a.inputs.get("calc_outputs", {}).items()}
         verdicts = validate_claims(
