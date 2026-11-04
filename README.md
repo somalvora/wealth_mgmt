@@ -10,7 +10,7 @@ The design is the single source of truth:
 | Phase | Scope (design §12) | State |
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
-| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, persistent consent, approval workflow with checkpoints done |
+| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, persistent consent, approval workflow, tool layer and MCP server done |
 | 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | Not started |
 
 What's in Phase 1:
@@ -30,6 +30,12 @@ What's in Phase 2 so far:
 1. **Model configuration** (`llm.py`). `HH_CHAT_MODEL` (default `ollama:qwen2.5:7b`) and `HH_EMBED_MODEL` (default `ollama:nomic-embed-text`, or `hash` for offline) choose the models. No other module names a model, and **no test needs Ollama**: tests use LangChain fake chat models and the deterministic `HashEmbeddings`.
 2. **Persistent consent** (`consent.py`). Grants and revocations are stored in append-only SQLite tables and reloaded on startup. Only the grantor can grant or revoke, and only for accounts they own. Every attempt is audited.
 3. **Approval workflow** (`approval.py`). A LangGraph graph plans an allocation, then pauses with `interrupt()` until a household admin or adult member approves or rejects it. The paused request is checkpointed with `SqliteSaver`, so it survives a restart. If the inputs changed since the plan was shown, the approval ends `stale`.
+4. **Agent tool layer** (`tools.py`). `ToolSession` exposes `list_accounts`, `query_ledger`, `run_calculation` and `ingest_statement`.
+   - The host binds the actor, purpose and correlation ID when it creates the session; none of them is a tool argument.
+   - `run_calculation` only accepts transaction IDs that this session already received from `query_ledger`.
+   - Each session has a call budget.
+   - Errors come back as data (`authorization_denied`, `ineligible_input`, `budget_exhausted`, …).
+5. **MCP server** (`mcp_server.py`). `household-finance-tools` is a stdio server that wraps `ToolSession`. Its identity comes from the environment (`HH_LEDGER_DB`, `HH_ACTOR`, `HH_PURPOSE`), so one process serves one authenticated user.
 
 ## Quick start
 
@@ -45,6 +51,8 @@ uv sync                                    # create .venv and install deps
 uv run pytest                              # run all tests
 uv run python -m household_agent.demo      # end-to-end demo on synthetic data
 uv run python scripts/generate_synthetic_data.py   # (re)write data/synthetic/*.csv
+HH_LEDGER_DB=ledger.db HH_ACTOR=alex HH_PURPOSE=budgeting \
+  uv run python -m household_agent.mcp_server       # MCP server on stdio (for an MCP client)
 ```
 
 The demo walks through five steps:
@@ -78,6 +86,8 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL), HashEmbeddings
   consent.py               Persistent, append-only consent grants and revocations
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
+  tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
+  mcp_server.py            household-finance-tools stdio MCP server over ToolSession
   synthetic.py             Demo household, accounts, rules, statements
   demo.py                  `python -m household_agent.demo`
 scripts/                   generate_synthetic_data.py
@@ -106,7 +116,10 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_consent.py` | 15 | Joint all-owner grants, grants and revocations survive a restart, 9 invalid-grant denials audited, grantor-only revocation, append-only tables |
 | `test_approval.py` | 15 | Interrupt payload, approve/reject, non-approvers denied while the graph keeps waiting, other household denied, stale inputs, not-eligible ends early, restart resume (repeated 5×) |
 
-Total: **115 passing**.
+| `test_tools.py` | 14 | Property-tax variance through the tools, ownership/consent/purpose-scoped account listing, denial audited, actor can't be passed as an argument, invented transaction IDs rejected, provisional opt-in, budget, 6 bad-request cases, ingest guards |
+| `test_mcp_server.py` | 8 | Tool list has no identity arguments, query + calculate over MCP, denial as data, `langchain-mcp-adapters` tools, server refuses to start without an identity (3 cases), real stdio subprocess end to end |
+
+Total: **137 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -137,7 +150,7 @@ These parts of the design are not implemented yet:
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
 - **Statement formats.** There is no PDF/OCR ingestion; only the CSV format above is supported.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
-- **Agents and orchestration.** The LangGraph supervisor and specialist agents, ChromaDB retrieval and the MCP server are next in Phase 2. The approval graph is not yet wired to the supervisor.
+- **Agents and orchestration.** The LangGraph supervisor and specialist agents, ChromaDB retrieval and the MCP server are next in Phase 2. The approval graph and MCP tools are not yet wired to the supervisor. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are not yet derived from the ledger, and planner runs are not yet stored as `calculation_runs`.

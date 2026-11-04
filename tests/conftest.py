@@ -24,3 +24,16 @@ def store(conn):
 @pytest.fixture
 def categorizer():
     return Categorizer(RULES)
+
+
+@pytest.fixture
+def seeded_store(store, categorizer):
+    """Ledger with every demo statement ingested by its owner (as in the demo)."""
+    from household_agent.pipeline import ingest_statement
+    from household_agent.synthetic import ALEX, DEMO_AS_OF, JORDAN, demo_statements
+
+    for name, content in demo_statements().items():
+        actor = JORDAN if "jordan_card" in name else ALEX
+        ingest_statement(store, categorizer, actor, content.encode(), name,
+                         purpose="statement_ingestion", correlation_id="seed", at=DEMO_AS_OF)
+    return store

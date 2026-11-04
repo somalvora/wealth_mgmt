@@ -46,6 +46,8 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.planning` | Tree-of-Thought beam search, `ThoughtGenerator` and `Critic` protocols, template personas | 5.8 | (Supervisor planning subgraph) |
 | `household_agent.llm` | The only place models are named: `get_chat_model()` / `get_embeddings()` from `HH_CHAT_MODEL` / `HH_EMBED_MODEL`; offline `HashEmbeddings` | 3.5 | — |
 | `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
+| `household_agent.tools` | `ToolSession`: identity/purpose bound by the host, call budget, structured errors, session-scoped transaction IDs | 3.2, 4.1 | all Ledger Analyst tools |
+| `household_agent.mcp_server` | `household-finance-tools` FastMCP stdio server over `ToolSession`; identity from env | 3.2, 4.2 | (MCP transport) |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 
 ## 3. Data flow: ingesting a statement
@@ -138,6 +140,21 @@ start_request(household, requested_by) ─► plan ─► plan_allocation ─►
 - **Checkpoints.** `SqliteSaver` needs **its own connection and file**. It manages its own transactions and can write from a worker thread, so sharing the ledger/audit connection fails intermittently ("cannot commit - no transaction is active").
 - **Re-execution.** On resume, LangGraph re-runs the `approval` node from the top. That's why the node has no side effects before `interrupt()`.
 
+## 4c. Tool calls: agents and MCP clients (`tools.py`, `mcp_server.py`)
+
+```
+host authenticates user ─► ToolSession(store, actor, purpose, correlation_id, max_calls)
+                               │  bound once; never a tool argument
+   LangGraph agent ──call(name, args)──┤
+   MCP client ──stdio── FastMCP tool ──┘──► list_accounts | query_ledger | run_calculation | ingest_statement
+                                               │ (LedgerStore authz + audit, CalculationRunner)
+                               ◄── {"ok": true, ...} | {"ok": false, "error": {"type", "message"}}
+```
+
+- **Session-scoped evidence.** `query_ledger` records the transactions it returned. `run_calculation` resolves IDs only from that record, so the model can't invent inputs, and it can't reuse IDs it saw in another member's session.
+- **Error types.** `authorization_denied`, `budget_exhausted`, `ineligible_input`, `duplicate_document`, `invalid_statement`, `calculation_error`, `invalid_request`. Unknown tools and bad arguments are `invalid_request`, never exceptions.
+- **MCP identity.** The MCP server reads `HH_ACTOR` / `HH_PURPOSE` once at startup and refuses to start if they're missing or unknown. The tool schemas contain no identity fields; a test asserts this.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -190,11 +207,14 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Approving numbers nobody saw | Input hash recomputed on resume; any change → `stale` | `approval.py` |
 | Consent forged or silently changed | Grantor-only grants for owned accounts; append-only tables; audited | `consent.py` |
 | Approval lost on restart | `SqliteSaver` checkpoint; resume by thread ID | `approval.py` |
+| Model impersonates another member | Actor/purpose bound in `ToolSession`/server env; not in tool schemas | `tools.py`, `mcp_server.py` |
+| Model invents calculation inputs | `run_calculation` takes only IDs this session queried | `tools.py` |
+| Runaway tool loops | Per-session `max_calls` budget → `budget_exhausted` | `tools.py` |
 | Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), and the durable approval interrupt (`approval.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`) and the stdio MCP server (`mcp_server.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
