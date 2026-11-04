@@ -10,7 +10,7 @@ The design is the single source of truth:
 | Phase | Scope (design §12) | State |
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
-| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, persistent consent, approval workflow, tool layer and MCP server done |
+| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs and model planner personas done |
 | 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | Not started |
 
 What's in Phase 1:
@@ -58,6 +58,12 @@ What's in Phase 2 so far:
    - **Exclusions.** Accounts the member can't read for `capital_allocation`, or that have no verified statement, are left out and listed. The inputs are then `complete=False`.
    - **Recorded runs.** `plan_from_ledger` stores every plan in `calculation_runs` (`fn="plan_allocation"`). The run carries the planner's input hash and all evidence IDs, is marked provisional if any account was left out, and is audited.
    - **Approval wiring.** `ledger_inputs_for` re-derives the inputs on every call. If a new statement lands between showing a plan and approving it, the approval ends `stale`.
+9. **Model-driven planner personas and critic** (`llm_planner.py`). These plug into the same `ThoughtGenerator` / `Critic` slots as the templates, so the search, the hard rules and the scoring are unchanged.
+   - **Personas.** `LLMThoughtGenerator` makes one model call per beam node (5 per run). The model returns one strategy per persona: tier, share of the remaining surplus, bucket weights, mode and a one-sentence rationale.
+   - **No amounts from the model.** The schema rejects unknown fields such as `amount_minor`, and a rationale that quotes a money amount is rejected too. The finance library still computes every cent.
+   - **Fallbacks.** A persona whose output is missing or malformed gets its template thought instead, and the fallback is recorded. A well-formed thought that breaks a rule (wrong tier, a bucket that doesn't belong to the tier) is hard-pruned rather than fixed, so the trace shows why it was dropped.
+   - **Critic.** `LLMCritic` scores a node from 0 to 1, clamped. It is advisory: a gap over 0.20 keeps the branch for human review (`needs_review`), and an unusable reply counts as "no opinion".
+   - **Approval.** `build_approval_graph` and `plan_from_ledger` accept `generator=` / `critic=`. Approving re-checks only the input hash, so it makes no model calls.
 
 ## Quick start
 
@@ -108,6 +114,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL), HashEmbeddings
   consent.py               Persistent, append-only consent grants and revocations
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
+  llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
@@ -146,8 +153,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
 | `test_plan_inputs.py` | 17 | Liquid cash, essentials and liabilities from verified statements (hand-computed), evidence IDs cover documents/runs/liabilities, plan run recorded with the planner's input hash and audited, reproducible hash, card balance owed becomes a liability, multi-month average rounds up, Jordan never sees Alex's private balance, dependent gets not_eligible, corrupt and out-of-window statements ignored, `statement_balances` append-only, invalid liabilities (3 cases), other household rejected, new statement makes approval `stale`, month-window and liability-sum properties (hypothesis) |
+| `test_llm_planner.py` | 17 | Model thoughts drive the same 15-node search in 5 calls, model fraction and rationale used, `<think>` and code fences stripped, unparseable reply falls back to templates, amount fields rejected, currency in rationale rejected, fraction > 1 rejected, missing/duplicate personas, out-of-tier bucket and wrong tier hard-pruned (not repaired), agreeing critic, disagreeing critic → `needs_review` with nothing pruned, unusable/NaN/extra-field critic replies have no opinion, approving makes no model calls, any reply yields one thought per persona and critic score clamped to [0, 1] (hypothesis) |
 
-Total: **203 passing**.
+Total: **220 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -182,7 +190,7 @@ These parts of the design are not implemented yet:
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are derived from the ledger (`plan_inputs.py`), but the demo's step 5 still uses the fixed synthetic inputs. Contribution room and return assumptions are still passed in rather than retrieved.
-  - The LLM persona generator and the critic arrive in Phase 2.
+  - The model persona generator and critic (`llm_planner.py`) are tested only with fake models so far. Their prompts haven't been tuned against `qwen2.5:7b` / `qwen3:8b`, and the demo still uses the template generator. Real-model runs happen on the Ollama machine.
 
 ## Data policy
 
