@@ -9,8 +9,8 @@ The design is the single source of truth:
 
 | Phase | Scope (design §12) | State |
 |---|---|---|
-| 1 | Steps 1–6 below | **Done**: 76 tests passing |
-| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | Not started |
+| 1 | Steps 1–6 below | **Done** |
+| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, persistent consent, approval workflow with checkpoints done |
 | 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | Not started |
 
 What's in Phase 1:
@@ -25,9 +25,20 @@ What's in Phase 1:
    - Thoughts are *strategies*. The finance library turns them into cents, enforces caps and the reserve floor, and scores them (0.40 tax, 0.35 liquidity, 0.25 yield).
    - The result is an approval-gated scenario; nothing moves money.
 
+What's in Phase 2 so far:
+
+1. **Model configuration** (`llm.py`). `HH_CHAT_MODEL` (default `ollama:qwen2.5:7b`) and `HH_EMBED_MODEL` (default `ollama:nomic-embed-text`, or `hash` for offline) choose the models. No other module names a model, and **no test needs Ollama**: tests use LangChain fake chat models and the deterministic `HashEmbeddings`.
+2. **Persistent consent** (`consent.py`). Grants and revocations are stored in append-only SQLite tables and reloaded on startup. Only the grantor can grant or revoke, and only for accounts they own. Every attempt is audited.
+3. **Approval workflow** (`approval.py`). A LangGraph graph plans an allocation, then pauses with `interrupt()` until a household admin or adult member approves or rejects it. The paused request is checkpointed with `SqliteSaver`, so it survives a restart. If the inputs changed since the plan was shown, the approval ends `stale`.
+
 ## Quick start
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Ollama is **not** needed to run the tests or the demo. It's only needed for real-model runs:
+
+```bash
+ollama pull qwen2.5:7b && ollama pull qwen3:8b && ollama pull nomic-embed-text
+export HH_CHAT_MODEL=ollama:qwen3:8b       # optional; default is ollama:qwen2.5:7b
+```
 
 ```bash
 uv sync                                    # create .venv and install deps
@@ -64,6 +75,9 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   calc_runner.py           Allowlisted calculation runner with provenance
   pipeline.py              parse → categorize → reconcile → persist
   planning.py              Tree-of-Thought beam-search planner (template generator)
+  llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL), HashEmbeddings
+  consent.py               Persistent, append-only consent grants and revocations
+  approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   synthetic.py             Demo household, accounts, rules, statements
   demo.py                  `python -m household_agent.demo`
 scripts/                   generate_synthetic_data.py
@@ -73,7 +87,7 @@ tests/                     pytest + hypothesis suites
 
 ## Testing
 
-Every feature ships with tests in the same change. A step isn't done until `uv run pytest` passes. Each new module gets:
+Every feature ships with tests in the same change. A step isn't done until `uv run pytest` passes, and no test may require Ollama or the network. Each new module gets:
 
 - **Happy-path tests** using hand-computed expected values.
 - **Negative-path tests** covering denials, rejected input, blocked data and pruned branches. The design's guardrails are only real if a test shows them refusing.
@@ -88,8 +102,11 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_ingest_reconcile.py` | 11 | Parser provenance and errors; reconciled, qualified and unreconciled outcomes; duplicates, reversals, confidence |
 | `test_ledger_and_calcs.py` | 10 | Upload denial audited, re-import blocked, provisional and unreconciled filtering, versioned corrections, reproducible calculations |
 | `test_planning.py` | 17 | Allocation expansion and constraints, 15-node beam search, rollout scoring, liquidity tie-break, hard pruning, advisory critic |
+| `test_llm.py` | 9 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis) |
+| `test_consent.py` | 15 | Joint all-owner grants, grants and revocations survive a restart, 9 invalid-grant denials audited, grantor-only revocation, append-only tables |
+| `test_approval.py` | 15 | Interrupt payload, approve/reject, non-approvers denied while the graph keeps waiting, other household denied, stale inputs, not-eligible ends early, restart resume (repeated 5×) |
 
-Total: **76 passing**.
+Total: **115 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -120,8 +137,7 @@ These parts of the design are not implemented yet:
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
 - **Statement formats.** There is no PDF/OCR ingestion; only the CSV format above is supported.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
-- **Agents and orchestration.** The LangGraph agents, checkpointer/interrupts, ChromaDB retrieval and the MCP server are planned for Phase 2.
-- **Consent management.** Consent grants live in memory and are not persisted.
+- **Agents and orchestration.** The LangGraph supervisor and specialist agents, ChromaDB retrieval and the MCP server are next in Phase 2. The approval graph is not yet wired to the supervisor.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are not yet derived from the ledger, and planner runs are not yet stored as `calculation_runs`.

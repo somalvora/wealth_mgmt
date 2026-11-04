@@ -44,6 +44,9 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.pipeline` | Orchestrates ingest end to end | 12 | — |
 | `household_finance.allocation` | Strategy → cents expansion, hard constraints, composite score, rollout | 3.4, 5.8 | `evaluate_allocation_candidates` |
 | `household_agent.planning` | Tree-of-Thought beam search, `ThoughtGenerator` and `Critic` protocols, template personas | 5.8 | (Supervisor planning subgraph) |
+| `household_agent.llm` | The only place models are named: `get_chat_model()` / `get_embeddings()` from `HH_CHAT_MODEL` / `HH_EMBED_MODEL`; offline `HashEmbeddings` | 3.5 | — |
+| `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
+| `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 
 ## 3. Data flow: ingesting a statement
 
@@ -116,6 +119,25 @@ PlanResult(status=awaiting_approval | needs_review | no_compliant_plan | not_eli
 
 **Generators.** `TemplateThoughtGenerator` produces fixed Conservative, Balanced and Tax-Aggressive strategies for Phase 1. Phase 2 swaps in LLM persona nodes behind the same protocol, and anything they propose still passes through the same validator.
 
+## 4b. Data flow: approval with a durable pause (`approval.py`)
+
+```
+start_request(household, requested_by) ─► plan ─► plan_allocation ─► audit "plan_allocation"
+                                            │ not_eligible / no_compliant_plan ─► END
+                                            ▼
+                                        approval ── interrupt({kind, correlation_id, plan}) ──► caller
+                                            ▲                     (state checkpointed in SQLite)
+   Command(resume={approver, approved, note}) ──────────────────────────────────────┘
+        approver not admin/adult of this household ─► audit deny, keep waiting
+        recomputed input_hash ≠ shown input_hash   ─► audit deny, status = stale
+        otherwise ─► audit allow, status = approved | rejected   (nothing executes)
+```
+
+- **State.** The graph state is JSON-safe: integer cents and decimal strings (`plan_summary`). The thread ID doubles as the audit `correlation_id`.
+- **Approval value.** Only the boolean `True` counts as approval; `"yes"` is a rejection.
+- **Checkpoints.** `SqliteSaver` needs **its own connection and file**. It manages its own transactions and can write from a worker thread, so sharing the ledger/audit connection fails intermittently ("cannot commit - no transaction is active").
+- **Re-execution.** On resume, LangGraph re-runs the `approval` node from the top. That's why the node has no side effects before `interrupt()`.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -127,6 +149,10 @@ All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers rai
 | `transactions` | (`transaction_id`, `version`) | Corrections insert `version + 1` with `correction_reason` |
 | `calculation_runs` | `run_id` | fn, params, input IDs, hashes, library version, provisional |
 | `audit_events` | `seq` | `prev_hash` → `hash` chain from a genesis of `"0"*64` |
+| `consent_grants` | `grant_id` | Grantor, grantee, accounts/actions/purposes JSON, effective/expiry, version |
+| `consent_revocations` | `grant_id` | A revocation is a new row (`revoked_by`, `revoked_at`), never an edit |
+
+LangGraph checkpoints are kept in a separate database (`checkpoints.db`) managed by `SqliteSaver`.
 
 `transaction_id = "txn_" + row_hash[:16]`. The row hash covers the account, date, amount, description and an **occurrence index**, so two genuinely identical charges still get distinct IDs.
 
@@ -159,9 +185,16 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step` | `allocation.py` |
 | Plan breaks caps or reserve | Hard prune before scoring; leaves must allocate exactly the surplus | `allocation.py`, `planning.py` |
 | Critic prunes a good branch | Critic is advisory; disagreement > 0.20 retains the branch for review | `planning.py` |
-| Plan treated as an action | `requires_approval=True`; there is no execution path | `planning.py` |
+| Plan treated as an action | `requires_approval=True`; there is no execution path | `planning.py`, `approval.py` |
+| Wrong person approves | Only admin/adult members of the same household; denials audited, graph keeps waiting | `approval.py` |
+| Approving numbers nobody saw | Input hash recomputed on resume; any change → `stale` | `approval.py` |
+| Consent forged or silently changed | Grantor-only grants for owned accounts; append-only tables; audited | `consent.py` |
+| Approval lost on restart | `SqliteSaver` checkpoint; resume by thread ID | `approval.py` |
+| Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
+
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), and the durable approval interrupt (`approval.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
