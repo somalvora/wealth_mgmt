@@ -51,6 +51,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.agents` | `Supervisor` graph (classify → dispatch loop → threshold → compose), `LedgerAnalyst` and `PolicyCompliance` ReAct subgraphs, `Router`, typed `TaskAssignment`/`AgentResult` | 4, 5.1 | (the agents) |
 | `household_agent.retrieval` | `RetrievalService` over ChromaDB: authorize-first `where` filters, MMR, per-passage verification, audit; `validate_claims` | 8 | `retrieve_verified`, `validate_claims` |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
+| `household_agent.llm_planner` | `LLMThoughtGenerator` (model personas, pydantic-validated, template fallback) and `LLMCritic` (clamped, advisory) behind the planner protocols | 5.8 | (planner personas / critic) |
 | `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
 
 ## 3. Data flow: ingesting a statement
@@ -122,7 +123,27 @@ PlanResult(status=awaiting_approval | needs_review | no_compliant_plan | not_eli
 - If |critic − composite| > 0.20, the node is flagged and retained even if it would have been cut, up to 2 per depth.
 - Any flag sets the status to `needs_review`. The critic can never prune a branch.
 
-**Generators.** `TemplateThoughtGenerator` produces fixed Conservative, Balanced and Tax-Aggressive strategies for Phase 1. Phase 2 swaps in LLM persona nodes behind the same protocol, and anything they propose still passes through the same validator.
+**Generators.** `TemplateThoughtGenerator` produces fixed Conservative, Balanced and Tax-Aggressive strategies for Phase 1. `llm_planner.LLMThoughtGenerator` is the Phase 2 model-driven version behind the same protocol:
+
+```
+beam node ──► one model call ──► {"thoughts": [...]} ──► per persona:
+                                                        pydantic (extra="forbid", fraction ∈ [0,1],
+                                                        weights > 0, no currency in rationale)
+                                                          │ valid                 │ invalid / missing
+                                                          ▼                       ▼
+                                                     Thought(model)       template Thought + fallback record
+                                                          └──────────┬────────────┘
+                                                                     ▼
+                                              _evaluate: wrong tier / bucket / cap ──► hard_pruned
+```
+
+- There is one model call per beam node, so 1 + 2 + 2 = 5 calls per run, which matches the "≤ 5 generation calls" target.
+- **Structure check.** The schema rejects every field it doesn't define. A model that sends `amount_minor` (or any amount) gets that persona replaced by its template thought, and the fallback is recorded in `generator.fallbacks`.
+- **Rule check.** Breaking a planning rule is *not* repaired. A wrong tier or a bucket outside the tier reaches `_evaluate` and is hard-pruned, so the trace shows the reason.
+- **Reply cleanup.** `<think>` blocks (qwen3) and code fences are stripped before parsing.
+- **Versioning.** `version = "llm_generator_1.0+<model spec>"` goes into the input hash, so template and model plans never share a hash.
+- **Critic.** `LLMCritic` asks for `{"score", "reason"}`, clamps the score to [0, 1] and quantizes it to 0.0001. An unusable reply (bad JSON, NaN, extra fields) returns the deterministic composite, so it can't trigger a false discrepancy, and the failure is recorded in `critic.failures`.
+- **Approval.** `build_approval_graph(..., generator=, critic=)` plans with these. On approve it only recomputes `inputs_hash(...)`, so approving makes no model calls.
 
 ## 4b. Data flow: approval with a durable pause (`approval.py`)
 
@@ -282,7 +303,8 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Silent edits | Append-only triggers, versioned corrections | `ledger.py` |
 | Cross-member leak | Deny-by-default and all-owner consent | `authz.py` |
 | Untraceable actions | Hash-chained audit log, `verify()` | `audit.py` |
-| LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step` | `allocation.py` |
+| LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step`; model thoughts with amount fields or currency in the rationale are rejected | `allocation.py`, `llm_planner.py` |
+| Model persona output is malformed | Per-persona template fallback, recorded; rule-breaking thoughts hard-pruned, not repaired | `llm_planner.py`, `planning.py` |
 | Plan breaks caps or reserve | Hard prune before scoring; leaves must allocate exactly the surplus | `allocation.py`, `planning.py` |
 | Critic prunes a good branch | Critic is advisory; disagreement > 0.20 retains the branch for review | `planning.py` |
 | Plan treated as an action | `requires_approval=True`; there is no execution path | `planning.py`, `approval.py` |
@@ -305,7 +327,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), and ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), and the model-driven personas and critic (`llm_planner.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
@@ -320,7 +342,7 @@ Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), 
 - **MCP.** A `household-finance-tools` stdio MCP server exposes the Phase 1 functions, consumed through `langchain-mcp-adapters`.
 - **Models.** Local Ollama models: `qwen2.5:7b` as the baseline, with `qwen3:8b` for comparison.
 - **Planner (§5.8).**
-  - Wrap `plan_allocation` as a Supervisor subgraph whose three persona prompts emit `pydantic`-validated `AllocationStep`s. CrewAI is not used.
+  - Persona prompts emit `pydantic`-validated `AllocationStep`s, with a model critic. **Done** (`llm_planner.py`; one batched call per beam node). CrewAI is not used.
   - Evaluate each depth in one batched `evaluate_allocation_candidates` call.
   - Fetch contribution limits once per job via `retrieve_verified`.
   - Derive `PlanningInputs` from reconciled ledger balances. **Done** (`plan_inputs.py`).

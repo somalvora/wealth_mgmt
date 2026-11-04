@@ -29,7 +29,7 @@ from langgraph.types import interrupt
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor
 from household_agent.models import Action, Role
-from household_agent.planning import PlanResult, plan_allocation
+from household_agent.planning import Critic, PlanResult, ThoughtGenerator, inputs_hash, plan_allocation
 from household_finance.allocation import PlanningInputs
 
 APPROVER_ROLES = frozenset({Role.HOUSEHOLD_ADMIN, Role.ADULT_MEMBER})
@@ -70,6 +70,8 @@ def build_approval_graph(
     members: Mapping[str, Actor],
     audit: AuditLog,
     checkpointer: BaseCheckpointSaver,
+    generator: ThoughtGenerator | None = None,
+    critic: Critic | None = None,
 ):
     def _audit(state: ApprovalState, actor_id: str, action: str, decision: str, reason: str, **details: Any) -> None:
         audit.append(
@@ -79,7 +81,7 @@ def build_approval_graph(
         )
 
     def plan(state: ApprovalState) -> ApprovalState:
-        summary = plan_summary(plan_allocation(inputs_for(state["household_id"])))
+        summary = plan_summary(plan_allocation(inputs_for(state["household_id"]), generator, critic))
         state = {**state, "plan": summary}
         _audit(state, state["requested_by"], "plan_allocation", "info", summary["status"],
                best_node_id=summary["best_node_id"], evaluations=summary["evaluations"])
@@ -97,7 +99,7 @@ def build_approval_graph(
 
         decision = {"approver": approver_id, "approved": answer.get("approved") is True,
                     "note": str(answer.get("note", ""))}
-        current = plan_allocation(inputs_for(state["household_id"])).input_hash
+        current = inputs_hash(inputs_for(state["household_id"]), generator)  # no model calls on approve
         if current != state["plan"]["input_hash"]:
             _audit(state, approver_id, Action.APPROVE.value, "deny", "plan inputs changed since review",
                    current_input_hash=current)

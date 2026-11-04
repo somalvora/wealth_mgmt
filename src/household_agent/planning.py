@@ -147,6 +147,11 @@ def _inputs_hash(inputs: PlanningInputs, generator_version: str) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def inputs_hash(inputs: PlanningInputs, generator: ThoughtGenerator | None = None) -> str:
+    """The ``input_hash`` that ``plan_allocation`` would report, without running the search."""
+    return _inputs_hash(inputs, (generator or TemplateThoughtGenerator()).version)
+
+
 def _evaluate(inputs: PlanningInputs, parent: PlanNode, thought: Thought) -> PlanNode:
     tier = thought.step.tier
     node_id = f"{parent.node_id}/d{tier}.{thought.persona}" if parent.depth else f"d{tier}.{thought.persona}"

@@ -32,7 +32,14 @@ from household_agent.authz import Actor
 from household_agent.calc_runner import CalculationRunner, _hash
 from household_agent.ledger import LedgerStore
 from household_agent.models import Action
-from household_agent.planning import PLANNER_VERSION, SCORING_VERSION, PlanResult, plan_allocation
+from household_agent.planning import (
+    PLANNER_VERSION,
+    SCORING_VERSION,
+    Critic,
+    PlanResult,
+    ThoughtGenerator,
+    plan_allocation,
+)
 from household_finance.allocation import PlanningInputs
 
 PURPOSE = "capital_allocation"
@@ -188,11 +195,11 @@ def record_plan_run(
 
 def plan_from_ledger(
     store: LedgerStore, runner: CalculationRunner, actor: Actor, *, as_of: datetime, correlation_id: str,
-    **kwargs: Any,
+    generator: ThoughtGenerator | None = None, critic: Critic | None = None, **kwargs: Any,
 ) -> tuple[PlanResult, DerivedInputs, str]:
     """Derive inputs, run the planner, record the run. Returns ``(result, derived, run_id)``."""
     derived = derive_planning_inputs(store, runner, actor, as_of=as_of, correlation_id=correlation_id, **kwargs)
-    result = plan_allocation(derived.inputs)
+    result = plan_allocation(derived.inputs, generator, critic)
     return result, derived, record_plan_run(store, actor, result, derived, correlation_id=correlation_id, at=as_of)
 
 
