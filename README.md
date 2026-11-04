@@ -27,7 +27,12 @@ What's in Phase 1:
 
 What's in Phase 2 so far:
 
-1. **Model configuration** (`llm.py`). `HH_CHAT_MODEL` (default `ollama:qwen2.5:7b`) and `HH_EMBED_MODEL` (default `ollama:nomic-embed-text`, or `hash` for offline) choose the models. No other module names a model, and **no test needs Ollama**: tests use LangChain fake chat models and the deterministic `HashEmbeddings`.
+1. **Model configuration** (`llm.py`). `HH_CHAT_MODEL` (default `ollama:qwen2.5:7b`) and `HH_EMBED_MODEL` (default `ollama:nomic-embed-text`, or `hash` for offline) choose the models. No other module names a model, and **no test needs Ollama or a network**: tests use LangChain fake chat models and the deterministic `HashEmbeddings`.
+   - **Groq (hosted, synthetic data only).** `groq:<model>`, for example `groq:qwen/qwen3-32b` or `groq:llama-3.1-8b-instant`, uses Groq's free API, so real-model runs work on a laptop without a local LLM. The key comes from `GROQ_API_KEY` in the environment or a git-ignored `.env` (see `.env.example`).
+     - **One shared rate limiter** for every Groq model in the process, default 20 requests a minute (`HH_REQUESTS_PER_MINUTE`). 429 responses are retried up to 6 times.
+     - **Answer cache** in `.cache/llm.sqlite` (`HH_LLM_CACHE`, `off` to disable), keyed by prompt, model settings and bound tools. Re-running an eval costs no calls; delete the file to re-sample. Messages are stored as plain dicts, never pickles, and the API key never enters the cache.
+     - **Qwen3 reasoning hidden** (`reasoning_format="hidden"`) so `<think>` text can't break JSON replies.
+     - Groq has no embedding API, so retrieval still uses `hash` or Ollama embeddings.
 2. **Persistent consent** (`consent.py`). Grants and revocations are stored in append-only SQLite tables and reloaded on startup. Only the grantor can grant or revoke, and only for accounts they own. Every attempt is audited.
 3. **Approval workflow** (`approval.py`). A LangGraph graph plans an allocation, then pauses with `interrupt()` until a household admin or adult member approves or rejects it. The paused request is checkpointed with `SqliteSaver`, so it survives a restart. If the inputs changed since the plan was shown, the approval ends `stale`.
 4. **Agent tool layer** (`tools.py`). `ToolSession` exposes `list_accounts`, `query_ledger`, `run_calculation` and `ingest_statement`.
@@ -114,6 +119,17 @@ ollama pull qwen2.5:7b && ollama pull qwen3:8b && ollama pull nomic-embed-text
 export HH_CHAT_MODEL=ollama:qwen3:8b       # optional; default is ollama:qwen2.5:7b
 ```
 
+ Without a local model, use Groq's free tier (synthetic data only). Create a key at console.groq.com, then:
+
+```bash
+cp .env.example .env                       # put GROQ_API_KEY=... in .env (git-ignored); never commit or paste it
+uv run python -m household_agent.vertical_slice --model groq:qwen/qwen3-32b
+uv run python -m household_agent.evals --model groq:qwen/qwen3-32b --planner-model groq:qwen/qwen3-32b --out eval_qwen3_32b.json
+uv run python -m household_agent.evals --model groq:llama-3.1-8b-instant --out eval_llama31_8b.json   # small-model comparison
+```
+
+Check the Groq console for the current model names and free-tier limits. If you see repeated 429 errors, lower `HH_REQUESTS_PER_MINUTE`.
+
 ```bash
 uv sync                                    # create .venv and install deps
 uv run pytest                              # run all tests
@@ -156,7 +172,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   calc_runner.py           Allowlisted calculation runner with provenance
   pipeline.py              parse → categorize → reconcile → persist
   planning.py              Tree-of-Thought beam-search planner (template generator)
-  llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL), HashEmbeddings
+  llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL): Ollama or Groq, shared rate limiter, SQLite answer cache, HashEmbeddings
   consent.py               Persistent, append-only consent grants and revocations
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
@@ -193,7 +209,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_ingest_reconcile.py` | 11 | Parser provenance and errors; reconciled, qualified and unreconciled outcomes; duplicates, reversals, confidence |
 | `test_ledger_and_calcs.py` | 10 | Upload denial audited, re-import blocked, provisional and unreconciled filtering, versioned corrections, reproducible calculations |
 | `test_planning.py` | 17 | Allocation expansion and constraints, 15-node beam search, rollout scoring, liquidity tie-break, hard pruning, advisory critic |
-| `test_llm.py` | 9 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis) |
+| `test_llm.py` | 22 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis); Groq client built with key, retries, hidden Qwen3 reasoning, cache and limiter (no network), one limiter shared by all Groq models, key and rate from `.env` without changing `os.environ`, cache can be turned off, cached answer replayed by a model with no answers left (also after reopening), tool calls survive the cache, API key absent from cache key and file, missing key fails before any call, zero/negative rate rejected, `groq:` without a name and Groq embeddings rejected, cache misses on other prompt/model and skips non-chat output, any prompt/answer round-trips (hypothesis) |
 | `test_consent.py` | 15 | Joint all-owner grants, grants and revocations survive a restart, 9 invalid-grant denials audited, grantor-only revocation, append-only tables |
 | `test_approval.py` | 15 | Interrupt payload, approve/reject, non-approvers denied while the graph keeps waiting, other household denied, stale inputs, not-eligible ends early, restart resume (repeated 5×) |
 | `test_tools.py` | 14 | Property-tax variance through the tools, ownership/consent/purpose-scoped account listing, denial audited, actor can't be passed as an argument, invented transaction IDs rejected, provisional opt-in, budget, 6 bad-request cases, ingest guards |
@@ -208,7 +224,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_eval_quality.py` | 17 | Cluster rules (7-day cluster, burst, card-testing probes) with hand-computed totals, runner splits baseline and returns transaction IDs, all four quality areas pass offline, cluster rules lift anomaly recall from 0.4 to 1.0, calculation oracle independent of the library, word-overlap check keeps a paraphrase and drops an unrelated source, no cluster rules → anomaly gate fails, wrong oracle value → calculation gate fails, a validator that trusts every citation fails precision, retrieval without scope filtering leaks and exposes canaries (retrieval + model prompts), allow-all authorizer exposes canaries in briefings and tools, baseline/categorized/credit rows never alert, strict limits ($300.00 exactly, 9 per day, 2 probes, 8 days late), every alert meets its rule and a full baseline silences all (hypothesis), any seed scores numbers and anomalies perfectly (hypothesis) |
 | `test_vertical_slice.py` | 12 | All 14 §12 checks pass offline, calc run → transactions → source hashes → correlation ID, artifacts kept in the workdir (briefing has the variance and pending approval, no private card), resume doesn't re-run planning, CLI report and exit code, model-factory path (router + specialists), a ledger model that skips its tools fails the trace while every guardrail check still passes, a router that hides a transfer is still refused, a misrouted allocation request fails the approval check without crashing, empty/failed reports not passed, playback past its script, any correlation ID tags every job event (hypothesis) |
 
-Total: **278 passing**.
+Total: **291 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -251,8 +267,8 @@ These parts of the design are not implemented yet:
   - The eval set is template-generated, not a human-labeled held-out set.
   - Membership inference is not scored (no fine-tuned model). The canary test covers runtime surfaces only.
   - Retrieval eval numbers use offline hash embeddings; `nomic-embed-text` numbers need the Ollama machine.
-  - Real-model eval numbers still need a run on the Ollama machine.
+  - Real-model eval numbers still need a run, either with Groq (`GROQ_API_KEY`) or on the Ollama machine. The Groq client is tested only offline so far; tool calling with Qwen3 and hidden reasoning has not been checked against the live API.
 
 ## Data policy
 
-Use **synthetic data only** until encryption at rest lands. Never commit real statements; `*.db` and `*.sqlite` are git-ignored.
+Use **synthetic data only** until encryption at rest lands. Never commit real statements; `*.db`, `*.sqlite`, `.env` and `.cache/` are git-ignored. Hosted models (Groq) must only ever see synthetic data: their free tiers are outside the household-controlled environment (design §11).

@@ -502,7 +502,7 @@ def run_vertical_slice(
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m household_agent.vertical_slice", description=__doc__.splitlines()[0])
-    ap.add_argument("--model", help="chat model spec for router and specialists, e.g. ollama:qwen2.5:7b "
+    ap.add_argument("--model", help="chat model spec for router and specialists, e.g. ollama:qwen2.5:7b or groq:qwen/qwen3-32b "
                                     "(default: offline playback)")
     ap.add_argument("--embed-model", default="hash", help="embedding spec (default: hash, offline)")
     ap.add_argument("--workdir", help="keep ledger.db, checkpoints.db, chroma/ and the briefing here")
