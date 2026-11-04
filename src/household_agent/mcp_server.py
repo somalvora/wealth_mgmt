@@ -55,7 +55,7 @@ def build_server(session: ToolSession) -> FastMCP:
     def run_calculation(fn: str, transaction_ids: list[str], params: dict[str, Any] | None = None,
                         allow_provisional: bool = False) -> dict[str, Any]:
         """Run an allowlisted finance function (cash_flow, category_totals,
-        variance_between_transactions, recurring_drift) on transactions from query_ledger."""
+        variance_between_transactions, recurring_drift, cluster_risk) on transactions from query_ledger."""
         return session.call("run_calculation", {"fn": fn, "transaction_ids": transaction_ids,
                                                 "params": params, "allow_provisional": allow_provisional})
 

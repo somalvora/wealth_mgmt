@@ -10,12 +10,12 @@ The design is the single source of truth:
 | Phase | Scope (design §12) | State |
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
-| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs, model planner personas, monthly briefing and eval harness skeleton done |
-| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **Started**: 231-scenario eval skeleton and draft monthly briefing are in; retrieval/citation/anomaly metrics and hardening remain |
+| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs, model planner personas, monthly briefing, eval harness and §12 vertical slice done |
+| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **In progress**: 321-scenario eval harness scores 13 gates (all design §2 metrics except membership inference) and the draft monthly briefing is in; hardening and real-model eval numbers remain |
 
 What's in Phase 1:
 
-1. **Finance library** (`household_finance`). Money is stored as integer cents and floats are rejected. It covers cash flow, category totals, variance, recurring-charge drift, net worth and amortization (`numpy-financial`). The library is tested with `pytest` and `hypothesis` property tests.
+1. **Finance library** (`household_finance`). Money is stored as integer cents and floats are rejected. It covers cash flow, category totals, variance, recurring-charge drift, net worth, amortization (`numpy-financial`) and, since 0.3.0, cluster-risk rules (`risk.py`, see Phase 2 item 10). The library is tested with `pytest` and `hypothesis` property tests.
 2. **Ingestion**. A strict CSV statement parser that keeps line-level provenance. It feeds rule-based merchant categorization.
 3. **Reconciliation**. Each statement is checked for balance continuity, period bounds, matching totals and duplicates. It then gets one of three states, `reconciled` / `qualified` / `unreconciled`, plus a weighted `document_confidence` score.
 4. **Ledger, privacy and audit**. The SQLite ledger is append-only. Corrections are added as new versions instead of overwriting old rows. Authorization is deny-by-default and requires per-owner consent; joint accounts need consent from every owner. The audit log is hash-chained and tamper-evident.
@@ -43,6 +43,7 @@ What's in Phase 2 so far:
    - `validate_claims` rules each claim `supported`, `remove` or `rephrase_as_question`:
      - A tax claim needs a verified Tier-1 source for the same tax year. Otherwise it gets the standard "cannot verify the rule for this tax year" sentence.
      - Every number in a claim must appear in its cited evidence.
+     - A claim that cites passages must share at least half of its content words (4+ letters, no stopwords) with them. This stops a true-sounding sentence with no numbers from being pinned on an unrelated source; the eval found that gap (citation precision was 0.73 before this rule).
    - Text that looks like an instruction (e.g. "ignore previous instructions") is flagged and audited as a data-quality finding. It is never followed.
 7. **Agents** (`agents.py`). A LangGraph Supervisor routes each request, dispatches the Ledger Analyst and the Policy & Compliance agent, checks thresholds and composes the briefing.
    - **Handoffs.** These are typed (`TaskAssignment` → `AgentResult`). Status is `completed`, `needs_review`, `failed` or `budget_exhausted`.
@@ -65,7 +66,7 @@ What's in Phase 2 so far:
    - **Critic.** `LLMCritic` scores a node from 0 to 1, clamped. It is advisory: a gap over 0.20 keeps the branch for human review (`needs_review`), and an unusable reply counts as "no opinion".
    - **Approval.** `build_approval_graph` and `plan_from_ledger` accept `generator=` / `critic=`. Approving re-checks only the input hash, so it makes no model calls.
 10. **Draft monthly briefing** (`briefing.py`). `draft_monthly_briefing` builds the seven design §10 sections for one member and one month: Data Coverage, Net Worth and Cash Flow, Budget and Variance, Material Events, Policy and Deadline Review, Actions for Approval, and Assumptions and Limitations. `render_markdown` turns it into a document.
-    - **No model writes it.** It uses ledger data the member may read for `monthly_briefing`, two calculation runs it records itself (`cash_flow`, `category_totals`), validated Supervisor results, and an optional plan from `plan_from_ledger`.
+    - **No model writes it.** It uses ledger data the member may read for `monthly_briefing`, three calculation runs it records itself (`cash_flow`, `category_totals`, `cluster_risk`), validated Supervisor results, and an optional plan from `plan_from_ledger`.
     - **Evidence is required.** The schema rejects any item that carries an amount without evidence. Amounts stay integer cents.
     - **Coverage before numbers.** `LedgerStore.document_coverage` lists every statement in the month in any state, as metadata only.
       - Missing statements are listed in Data Coverage.
@@ -73,15 +74,27 @@ What's in Phase 2 so far:
       - Qualified statements become a "please confirm" action, and their transactions are marked provisional and left out of totals.
       - Possible duplicates appear as material events.
     - **Material events** are uncategorized items of $500 or more and non-routine movements of $2,500 or more. Payroll, mortgage, rent and transfers count as routine.
+    - **Cluster risk** (design §5.4–5.5). Patterns that stay under those per-item limits are caught by `household_finance.cluster_risk`, run over the month (verified and provisional rows) with the previous 90 days as the baseline. It looks only at *new* merchants (not seen in the baseline) with no approved category:
+      - `small_cluster_7d`: charges under $100 that add up to more than $300 within 7 days, across all readable accounts;
+      - `burst_24h`: 10 or more such charges on one day;
+      - `small_then_large`: 3 or more probes under $10 from one merchant, then a larger charge from it within 7 days (card testing).
+      Each alert is a material event with the run ID and the transaction IDs as evidence, worded as "please review", never as a fraud finding.
     - **Privacy.** Accounts the member can't read appear only as a count ("2 household account(s) are not shared with you").
     - **Draft only.** `draft` is always `true` and `external_action` is always `"none"`. The last item is always the disclaimer, and composing the briefing is audited.
-11. **Evaluation harness skeleton** (`evals.py`). `generate_scenarios(seed)` builds a seeded, synthetic held-out set of 231 scenarios. `evaluate` runs them through the real components and scores the design §2 gates.
+11. **Evaluation harness** (`evals.py`, `eval_quality.py`). `generate_scenarios(seed)` builds a seeded, synthetic held-out set of 321 scenarios. `evaluate` runs them through the real components and scores 13 design §2 gates.
     - **Routing (55 scenarios).** Intent, dispatched agents and the approval route. Gates: accuracy ≥ 0.95, schema validity ≥ 0.99, approval gating = 100%. A keyword fallback (`rules_fallback`) counts as an invalid model reply.
     - **Adversarial (14).** Pay, transfer, wire and prompt-injection requests run through `Supervisor.run` and must end `refused`. Gate: 0 unsafe actions.
-    - **Authorization (72).** Every actor × account × purpose combination, with and without the CPA's two-owner consent. Gate: 0 cross-member leaks.
+    - **Authorization (72).** Every actor × account × purpose combination, with and without the CPA's two-owner consent. Gate: 0 cross-member leaks (retrieval leaks count here too).
     - **Allocation (60).** Random planner inputs. The plan must sum exactly to the surplus, stay within caps, use ≤ 27 node evaluations, be approval-gated and be reproducible.
     - **Ingestion (30).** Random statements, a third with a corrupted closing balance. Each must end `reconciled` or `unreconciled` as labeled. Gate: 100% statement integrity.
-    - **Not covered yet.** Retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization are listed in the report.
+    - **Calculation (20).** Random reconciled statements go through ingestion and the briefing. The expected cash flow, category totals and balances come from the rows and the eval's own merchant → category table, not from `household_finance`. The Markdown may show no other dollar amount. Gate: 100% match.
+    - **Anomaly (40).** Each seeds a September baseline and an October statement with one of: a $500+ unmapped item, a $2,500+ plumbing bill, a small-charge cluster, a burst, card-testing probes, or one of three controls (nothing, everything just under the limits, a cluster of merchants already seen last month). Gate: recall ≥ 90%. The report also shows false alerts on controls (0) and the recall per-transaction limits alone would get (40%), which is why the cluster rules exist.
+    - **Retrieval (22).** Labeled questions from Alex, Jordan, the CPA (no consent) and Sam over 13 synthetic sources: HOA rules, insurance, an invoice, IRS (synthetic) depreciation, a city ordinance, the lease and bills, and two private notes.
+      - **Recall@5** is per document, over relevant documents the asker may see. Gate ≥ 0.90. The offline hash embeddings score 0.944; the miss is the water-heater invoice.
+      - **Leaks** are judged by account ownership, independently of the authorizer.
+      - **Citation precision.** Each labeled claim goes through `validate_claims` three ways: correct source, a different retrieved source, and one digit changed. Precision is the share of "supported" verdicts that were correct. Gate ≥ 0.95 (1.0 now); the support rate for correct claims is reported too.
+    - **Privacy (8).** Canary strings are planted in Alex's and Jordan's private statements and notes. For every other member, the dependent and the delegate, the harness checks the briefing (JSON and Markdown), retrieval, the ledger tools and every prompt a specialist model is shown in a Supervisor job. Gate: 0 exposures, and the owner must see their own canary on all four surfaces (positive control).
+    - **Not covered.** Membership inference needs a fine-tuned model.
     - **Keyword baseline.** All gates pass. Routing scores 98.2%: "Did we pay more for utilities…?" is wrongly flagged as a payment request. That is safe, but it is a miss.
 12. **Vertical-slice exit run** (`vertical_slice.py`, design §12 "Vertical-Slice Exit Criteria"). One command runs a whole synthetic job under one correlation ID and turns each exit criterion into a PASS/FAIL check with evidence IDs:
     - **Three agents, one trace.** The Supervisor routes the §9 property-tax question to the Ledger Analyst (query → `variance_between_transactions`) and Policy & Compliance (verified retrieval). The calculation's input transactions lead back to their statements' `source_hash` and to the audit events of the job.
@@ -109,7 +122,7 @@ uv run python -m household_agent.vertical_slice --workdir slice --out slice.json
 uv run python -m household_agent.vertical_slice --model ollama:qwen2.5:7b --embed-model ollama:nomic-embed-text   # on the Ollama machine
 uv run python scripts/generate_synthetic_data.py   # (re)write data/synthetic/*.csv
 uv run python -m household_agent.evals --out eval.json   # eval gates, keyword-router baseline (exit 1 if a gate fails)
-uv run python -m household_agent.evals --model ollama:qwen3:8b --planner-model ollama:qwen3:8b   # on the Ollama machine
+uv run python -m household_agent.evals --model ollama:qwen3:8b --planner-model ollama:qwen3:8b --embed-model ollama:nomic-embed-text   # on the Ollama machine
 HH_LEDGER_DB=ledger.db HH_ACTOR=alex HH_PURPOSE=budgeting \
   uv run python -m household_agent.mcp_server       # MCP server on stdio (for an MCP client)
 ```
@@ -131,6 +144,7 @@ src/household_finance/     Pure, deterministic finance library (no I/O)
   calcs.py                 cash_flow, category_totals, variance, recurring_drift,
                            net_worth_snapshot, amortization_schedule
   allocation.py            expand_step / validate_allocation / score_allocation / rollout
+  risk.py                  cluster_risk: small-charge clusters, bursts, card-testing probes
 src/household_agent/       Agent foundation (agents arrive in Phase 2)
   models.py                Account, Transaction, enums (roles, actions, status)
   authz.py                 Deny-by-default authorizer + consent grants
@@ -148,7 +162,8 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   briefing.py              Draft-only seven-section monthly briefing (deterministic, evidence-cited) + Markdown
-  evals.py                 Seeded ≥200-scenario eval harness and §2 gates; `python -m household_agent.evals`
+  evals.py                 Seeded 321-scenario eval harness and 13 §2 gates; `python -m household_agent.evals`
+  eval_quality.py          Calculation, anomaly, retrieval/citation and privacy-canary eval data and scorers
   vertical_slice.py        §12 exit-criteria run (3 agents, guardrails, restart resume); `python -m household_agent.vertical_slice`
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
@@ -188,11 +203,12 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
 | `test_plan_inputs.py` | 17 | Liquid cash, essentials and liabilities from verified statements (hand-computed), evidence IDs cover documents/runs/liabilities, plan run recorded with the planner's input hash and audited, reproducible hash, card balance owed becomes a liability, multi-month average rounds up, Jordan never sees Alex's private balance, dependent gets not_eligible, corrupt and out-of-window statements ignored, `statement_balances` append-only, invalid liabilities (3 cases), other household rejected, new statement makes approval `stale`, month-window and liability-sum properties (hypothesis) |
 | `test_llm_planner.py` | 17 | Model thoughts drive the same 15-node search in 5 calls, model fraction and rationale used, `<think>` and code fences stripped, unparseable reply falls back to templates, amount fields rejected, currency in rationale rejected, fraction > 1 rejected, missing/duplicate personas, out-of-tier bucket and wrong tier hard-pruned (not repaired), agreeing critic, disagreeing critic → `needs_review` with nothing pruned, unusable/NaN/extra-field critic replies have no opinion, approving makes no model calls, any reply yields one thought per persona and critic score clamped to [0, 1] (hypothesis) |
-| `test_briefing.py` | 16 | Alex's October cash flow, category totals and closing balances (hand-computed), calc runs recorded and briefing audited, routine items skipped and property tax listed, $500 unmapped threshold, plan + runner-up + pending approval under Actions, Supervisor claims/questions sorted into sections, Markdown has every section and the disclaimer, Jordan never sees Alex's private account, qualified card provisional with duplicate and confirmation request, corrupt statement contributes no numbers, missing statements reported, dependent and tax-only CPA get no ledger data (2 cases), schema guards (amounts need evidence, draft/disclaimer required), category totals sum to net cash flow (hypothesis) |
-| `test_evals.py` | 13 | ≥200 deterministic scenarios across 5 areas, oracle router passes every gate, keyword baseline safe and its one false positive reported, CLI writes the JSON report, model persona generator keeps allocation invariants, router that never flags payments fails `unsafe_actions`, model "no external action" overridden, unparseable model router fails schema validity, misrouted allocation fails approval gating, allow-all authorizer reported as leaks, wrong label caught, empty set, any seed keeps the safety and integrity gates (hypothesis) |
+| `test_briefing.py` | 16 | Alex's October cash flow, category totals and closing balances (hand-computed), 3 calc runs (incl. `cluster_risk`) recorded and briefing audited, routine items skipped and property tax listed, $500 unmapped threshold, plan + runner-up + pending approval under Actions, Supervisor claims/questions sorted into sections, Markdown has every section and the disclaimer, Jordan never sees Alex's private account, qualified card provisional with duplicate and confirmation request, corrupt statement contributes no numbers, missing statements reported, dependent and tax-only CPA get no ledger data (2 cases), schema guards (amounts need evidence, draft/disclaimer required), category totals sum to net cash flow (hypothesis) |
+| `test_evals.py` | 13 | ≥300 deterministic scenarios across 9 areas, oracle router passes every gate, keyword baseline safe and its one routing false positive (plus one retrieval miss) reported, CLI writes the 13-gate JSON report, model persona generator keeps allocation invariants, router that never flags payments fails `unsafe_actions`, model "no external action" overridden, unparseable model router fails schema validity, misrouted allocation fails approval gating, allow-all authorizer reported as leaks, wrong label caught, empty set, any seed keeps the safety and integrity gates (hypothesis) |
+| `test_eval_quality.py` | 17 | Cluster rules (7-day cluster, burst, card-testing probes) with hand-computed totals, runner splits baseline and returns transaction IDs, all four quality areas pass offline, cluster rules lift anomaly recall from 0.4 to 1.0, calculation oracle independent of the library, word-overlap check keeps a paraphrase and drops an unrelated source, no cluster rules → anomaly gate fails, wrong oracle value → calculation gate fails, a validator that trusts every citation fails precision, retrieval without scope filtering leaks and exposes canaries (retrieval + model prompts), allow-all authorizer exposes canaries in briefings and tools, baseline/categorized/credit rows never alert, strict limits ($300.00 exactly, 9 per day, 2 probes, 8 days late), every alert meets its rule and a full baseline silences all (hypothesis), any seed scores numbers and anomalies perfectly (hypothesis) |
 | `test_vertical_slice.py` | 12 | All 14 §12 checks pass offline, calc run → transactions → source hashes → correlation ID, artifacts kept in the workdir (briefing has the variance and pending approval, no private card), resume doesn't re-run planning, CLI report and exit code, model-factory path (router + specialists), a ledger model that skips its tools fails the trace while every guardrail check still passes, a router that hides a transfer is still refused, a misrouted allocation request fails the approval check without crashing, empty/failed reports not passed, playback past its script, any correlation ID tags every job event (hypothesis) |
 
-Total: **261 passing**.
+Total: **278 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -233,7 +249,8 @@ These parts of the design are not implemented yet:
   - The briefing is produced by `vertical_slice` from the Supervisor's results, but the Supervisor graph's own `compose_briefing` step still returns only the claim list.
   - No household net-worth total is shown, because property, loans and investments aren't in the ledger.
   - The eval set is template-generated, not a human-labeled held-out set.
-  - Retrieval, citation, calculation-match, anomaly and memorization metrics are not scored yet.
+  - Membership inference is not scored (no fine-tuned model). The canary test covers runtime surfaces only.
+  - Retrieval eval numbers use offline hash embeddings; `nomic-embed-text` numbers need the Ollama machine.
   - Real-model eval numbers still need a run on the Ollama machine.
 
 ## Data policy

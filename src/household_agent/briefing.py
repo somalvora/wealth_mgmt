@@ -18,7 +18,7 @@ money moves.
 import calendar
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -38,6 +38,7 @@ BRIEFING_VERSION = "monthly_briefing_1.0"
 PURPOSE = "monthly_briefing"
 LARGE_TXN_MINOR = 250_000  # $2,500: non-routine movements at or above this are material events
 UNMAPPED_MIN_MINOR = 50_000  # $500: uncategorized items at or above this are material events
+BASELINE_DAYS = 90  # merchants seen in this look-back are not "new" for the cluster rules
 ROUTINE_CATEGORIES = frozenset({"salary", "mortgage", "rent", "rental_income", "transfer"})
 DUPLICATE_CODES = frozenset({"possible_duplicate", "duplicate_of_ingested"})
 DISCLAIMER = ("This is a draft for the household. It is informational only, not financial, legal or tax "
@@ -229,6 +230,20 @@ def draft_monthly_briefing(
                     kind=kind, provisional=t.transaction_id not in verified_ids,
                     evidence_ids=[t.transaction_id, t.source_document_id], amounts_minor={"amount": t.amount_minor},
                     text=f"{t.posted_at} {t.merchant_normalized} ({t.category})"))
+        if everything:
+            # Cluster rules (design §5.5): new unmapped small charges that each stay under the limits above
+            history = store.query_transactions(actor, PURPOSE, correlation_id, readable,
+                                               start - timedelta(days=BASELINE_DAYS), start - timedelta(days=1),
+                                               include_provisional=True, at=as_of)
+            risk = runner.run("cluster_risk", [*history, *everything], actor_id=actor.member_id,
+                              household_id=actor.household_id, correlation_id=correlation_id, params=params,
+                              acting_agent="briefing", allow_provisional=True)
+            run_ids.append(risk.run_id)
+            for a in risk.output:
+                s["material_events"].append(BriefingItem(
+                    kind=a["rule"], evidence_ids=[risk.run_id, *a["transaction_ids"]],
+                    provisional=any(i not in verified_ids for i in a["transaction_ids"]),
+                    amounts_minor={"total": a["total_minor"]}, text=f"{a['explanation']}; please review."))
 
     # Supervisor results: validated claims, open questions and threshold findings
     for raw in agent_results:

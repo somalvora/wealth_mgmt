@@ -308,6 +308,17 @@ def _numbers(text: str) -> set[str]:
     return out
 
 
+_STOPWORDS = frozenset("""about after also been before does from have into more only over that than their them then
+there these they this under were what when where which while with would your""".split())
+MIN_WORD_OVERLAP = 0.5  # share of a claim's content words that its cited passages must contain
+
+
+def _content_words(text: str) -> set[str]:
+    """Lower-cased words of 4+ letters, without stopwords or a plural "s"."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", text)} - _STOPWORDS
+    return {w[:-1] if w.endswith("s") and not w.endswith("ss") else w for w in words}
+
+
 def validate_claims(
     claims: Sequence[Claim],
     passages: Sequence[dict[str, Any]],
@@ -317,7 +328,9 @@ def validate_claims(
 
     ``passages`` are the results of ``retrieve_verified`` in this job; ``calc_outputs`` maps
     calculation ``run_id`` to its stored output. A claim may only cite those. Every number
-    in a claim must appear in its cited evidence, which blocks invented amounts.
+    in a claim must appear in its cited evidence, which blocks invented amounts, and a claim
+    citing passages must share at least half of its content words with them, which blocks a
+    true-sounding sentence pinned on an unrelated source.
     """
     by_id = {p["chunk_id"]: p for p in passages}
     calc_outputs = calc_outputs or {}
@@ -345,6 +358,9 @@ def validate_claims(
             verdicts.append(verdict("rephrase_as_question", "no verified supporting passage"))
         elif missing := sorted(_numbers(claim.text) - _numbers(evidence_text)):
             verdicts.append(verdict("remove", f"numbers not found in cited evidence: {missing}"))
+        elif usable and (words := _content_words(claim.text)) and len(
+                words & _content_words(" ".join(p["text"] for p in usable))) < MIN_WORD_OVERLAP * len(words):
+            verdicts.append(verdict("rephrase_as_question", "cited passages do not say what the claim says"))
         else:
             verdicts.append(verdict("supported", "supported by cited evidence"))
     return verdicts

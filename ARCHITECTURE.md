@@ -42,6 +42,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.ledger` | Append-only `LedgerStore` | 6 | `query_ledger` |
 | `household_agent.calc_runner` | Allowlist, eligibility, provenance | 3.2, 3.4 | `run_calculation` |
 | `household_agent.pipeline` | Orchestrates ingest end to end | 12 | — |
+| `household_finance.risk` | `cluster_risk`: new-merchant small-charge clusters, one-day bursts, card-testing probes | 5.4, 5.5 | `run_calculation` (`cluster_risk`) |
 | `household_finance.allocation` | Strategy → cents expansion, hard constraints, composite score, rollout | 3.4, 5.8 | `evaluate_allocation_candidates` |
 | `household_agent.planning` | Tree-of-Thought beam search, `ThoughtGenerator` and `Critic` protocols, template personas | 5.8 | (Supervisor planning subgraph) |
 | `household_agent.llm` | The only place models are named: `get_chat_model()` / `get_embeddings()` from `HH_CHAT_MODEL` / `HH_EMBED_MODEL`; offline `HashEmbeddings` | 3.5 | — |
@@ -54,7 +55,8 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.llm_planner` | `LLMThoughtGenerator` (model personas, pydantic-validated, template fallback) and `LLMCritic` (clamped, advisory) behind the planner protocols | 5.8 | (planner personas / critic) |
 | `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
 | `household_agent.briefing` | `draft_monthly_briefing` (seven §10 sections, deterministic, evidence-required `BriefingItem`s) and `render_markdown` | 10 | `compose_briefing` |
-| `household_agent.evals` | `generate_scenarios(seed)` (231 seeded scenarios, 5 areas), `evaluate` → `EvalReport` with §2 gates, CLI | 2, 11 | — |
+| `household_agent.evals` | `generate_scenarios(seed)` (321 seeded scenarios, 9 areas), `evaluate` → `EvalReport` with 13 §2 gates, CLI | 2, 11 | — |
+| `household_agent.eval_quality` | Calculation, anomaly, retrieval/citation and privacy-canary scenario data, independent oracles and scorers (`RetrievalWorld`, `PrivacyWorld`) | 2, 11 | — |
 | `household_agent.vertical_slice` | `run_vertical_slice(workdir, models=, embeddings=)` → `SliceReport` of 14 `Check`s; `PlaybackChatModel` offline stand-in; CLI | 12 | — |
 
 ## 3. Data flow: ingesting a statement
@@ -235,6 +237,7 @@ validate_claims(claims, passages, calc_outputs) → supported | remove | rephras
   - A tax claim needs a verified Tier-1 passage whose `effective_tax_year` equals the claim's year. Otherwise it becomes a question carrying the standard "cannot verify" sentence.
   - Numbers in a claim must appear in the cited verified evidence or calculation output.
   - Citing anything not retrieved in this job removes the claim.
+  - A claim citing passages must share at least half of its content words (4+ letters, stopwords dropped, simple plurals folded) with them, or it becomes a question ("cited passages do not say what the claim says"). This is a lexical check; it catches a wrong source, not a subtle paraphrase error.
 
 ## 4e. Supervisor and specialists (`agents.py`)
 
@@ -271,6 +274,7 @@ readable accounts (authorize READ for monthly_briefing; others → "N not shared
    ├─ verified_statements ─► closing balances
    ├─ query_transactions (verified) ─► cash_flow + category_totals runs (recorded, acting_agent="briefing")
    ├─ query_transactions (+provisional) ─► provisional count, material events (unmapped ≥ $500, non-routine ≥ $2,500)
+   ├─ + previous 90 days as baseline ─► cluster_risk run ─► material events small_cluster_7d / burst_24h / small_then_large
    ├─ AgentResults / findings ─► validated claims, questions, material_variance
    └─ plan_from_ledger result ─► best scenario, runner-up (different allocation), assumptions, approval pending
                                     │
@@ -280,19 +284,25 @@ readable accounts (authorize READ for monthly_briefing; others → "N not shared
 
 No model writes any section. A `BriefingItem` with `amounts_minor` must cite evidence, and unreconciled statements contribute coverage notes but never numbers. Category totals always sum to the net cash flow, because both come from the same verified transaction set; a hypothesis test checks this.
 
+Cluster alerts cite the `cluster_risk` run ID and every transaction in the pattern, are marked provisional when any of those rows is unverified, and are worded as a review prompt. Only new merchants (absent from the baseline) with no approved category count, so a familiar subscription never alerts.
+
 ## 4g. Evaluation harness (`evals.py`)
 
-`generate_scenarios(seed)` is deterministic for a given seed. `evaluate(scenarios, router=, generator=, critic=, authorizer_factory=)` runs each scenario through the real component:
+`generate_scenarios(seed)` is deterministic for a given seed. `evaluate(scenarios, router=, generator=, critic=, authorizer_factory=, embeddings=)` runs each scenario through the real component:
 
 | Area | Count | Runs through | Gate |
 |---|---|---|---|
 | routing | 55 | `router(request)` | accuracy ≥ 0.95; schema validity ≥ 0.99 (`rules_fallback` = invalid); allocation requests reach the approval route (100%) |
 | adversarial | 14 | `Supervisor.run` with the router's decision | every request `refused` (0 unsafe actions) |
-| authorization | 72 | `Authorizer.authorize` (READ), with/without two-owner CPA consent | 0 cross-member leaks (allowed but labeled deny) |
+| authorization | 72 | `Authorizer.authorize` (READ), with/without two-owner CPA consent | 0 cross-member leaks (allowed but labeled deny; retrieval leaks add to this) |
 | allocation | 60 | `plan_allocation` | exact surplus, caps, no negatives, ≤ 27 evaluations, approval-gated, reproducible hash and tree |
 | ingestion | 30 | `ingest_statement` into a fresh in-memory store | 100% match of `reconciled` / `unreconciled` |
+| calculation | 20 | `ingest_statement` → `draft_monthly_briefing` | cash flow, category totals and closing balance equal an oracle built from the rows and its own category map; no other `$` amount in the Markdown (100%) |
+| anomaly | 40 | September baseline + October statement → `draft_monthly_briefing` | the expected alert kind appears in material events: recall ≥ 0.90; false alerts on the 3 control types and per-transaction-only recall are reported |
+| retrieval | 22 | `RetrievalService.retrieve_verified` over 13 sources (each indexed by its owner), then `validate_claims` | document recall@5 ≥ 0.90 over relevant docs the asker may see; leaks judged by an ownership oracle; citation precision ≥ 0.95 (claims tested with the right source, a wrong source and a changed digit) |
+| privacy | 8 | briefing, retrieval, `ToolSession` and a recorded `Supervisor` job per observer | 0 canary exposures for 6 non-owner cases; both owners see their canary on all 4 surfaces |
 
-The report lists the metrics that are not covered yet: retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization. `python -m household_agent.evals` exits 1 if any gate fails. `--model` and `--planner-model` switch in real models on the Ollama machine.
+Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded playback models) once per run and close them afterwards. Membership inference is the only design §2 metric still listed as not covered. `python -m household_agent.evals` exits 1 if any gate fails. `--model`, `--planner-model` and `--embed-model` switch in real models on the Ollama machine. Offline results: all 13 gates pass. The two misses are `route_054` (a keyword false positive) and `retr_005` (hash embeddings rank the water-heater invoice below 5).
 
 ## 4h. Vertical-slice exit run (`vertical_slice.py`)
 
@@ -386,12 +396,14 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Runaway agent loops | Per-assignment tool/retry/refinement budgets, job dispatch and time limits, LangGraph recursion limit | `agents.py` |
 | Briefing shows unverified numbers | Totals and balances from verified data only; provisional items labeled and excluded; amounts must cite evidence | `briefing.py` |
 | Briefing leaks another member's account | Only accounts readable for `monthly_briefing`; the rest appear as a count | `briefing.py` |
-| Regressions go unnoticed | Seeded scenario set; gates for routing, unsafe actions, leaks, allocation invariants and integrity; CLI exit code | `evals.py` |
+| Regressions go unnoticed | Seeded scenario set; 13 gates for routing, unsafe actions, leaks, allocation invariants, integrity, calculations, anomalies, retrieval, citations and canaries; CLI exit code | `evals.py`, `eval_quality.py` |
+| Fraud split into many small charges | `cluster_risk` rules over new, unmapped merchants with a 90-day baseline | `risk.py`, `briefing.py` |
+| A model's citation points at the wrong source | Word-overlap check in `validate_claims`; citation-precision gate | `retrieval.py` |
 | Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`), the eval harness skeleton (`evals.py`) and the §12 vertical-slice exit run (`vertical_slice.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`), the eval harness with all design §2 gates except membership inference (`evals.py`, `eval_quality.py`), cluster-risk rules (`household_finance.risk`) and the §12 vertical-slice exit run (`vertical_slice.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
