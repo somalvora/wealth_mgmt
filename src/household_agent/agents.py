@@ -242,7 +242,7 @@ def parse_final(state: _LoopState) -> tuple[list[ResultClaim], str | None]:
     if not isinstance(last, AIMessage) or last.tool_calls:
         return [], None  # stopped by budget/retries; status explains why
     try:
-        return _FinalAnswer.model_validate_json(_FENCE.sub("", str(last.content).strip())).claims, None
+        return _FinalAnswer.model_validate_json(_FENCE.sub("", str(last.text).strip())).claims, None
     except ValidationError as exc:
         return [], f"unparseable final answer: {exc.error_count()} validation error(s)"
 
@@ -393,7 +393,7 @@ class Router:
             return rule_route(request), "rules"
         reply = self.model.invoke([SystemMessage(ROUTER_PROMPT), HumanMessage(request)])
         try:
-            decision = RoutingDecision.model_validate_json(_FENCE.sub("", str(reply.content).strip()))
+            decision = RoutingDecision.model_validate_json(_FENCE.sub("", str(reply.text).strip()))
         except ValidationError:
             return rule_route(request), "rules_fallback"
         if _EXTERNAL.search(request) and rule_route(request).external_action_requested:

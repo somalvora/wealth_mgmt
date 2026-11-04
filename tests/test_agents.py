@@ -247,6 +247,15 @@ def test_model_router_cannot_clear_the_external_action_flag(seeded_store):
     assert source == "model" and decision.external_action_requested
 
 
+def test_router_reads_replies_split_into_content_blocks(seeded_store):
+    # Gemini-style reply: text arrives as blocks, possibly beside non-text (reasoning) blocks
+    body = json.dumps({"intent": "historical_comparison", "dispatch_plan": [{"agent": "ledger_analyst", "task": "x"}]})
+    blocks = [{"type": "reasoning", "reasoning": "thinking..."},
+              {"type": "text", "text": body[:20]}, {"type": "text", "text": body[20:]}]
+    decision, source = Router(Scripted(steps=[AIMessage(content=blocks)]))(TRACE_QUERY)
+    assert source == "model" and decision.dispatch_plan[0].agent == "ledger_analyst"
+
+
 @pytest.mark.parametrize("reply", [
     "not json",
     json.dumps({"intent": "historical_comparison", "dispatch_plan": [{"agent": "tax_agent", "task": "x"}]}),

@@ -6,6 +6,7 @@ from hypothesis import strategies as st
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, Generation
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
@@ -15,6 +16,7 @@ from household_agent.llm import (
     ENV_CACHE,
     ENV_CHAT_MODEL,
     ENV_EMBED_MODEL,
+    ENV_GEMINI_KEYS,
     ENV_GROQ_KEY,
     ENV_RPM,
     HashEmbeddings,
@@ -33,6 +35,8 @@ def groq_env(monkeypatch, tmp_path):
     """Fake key, cache in tmp, fresh shared limiter; no network is touched by construction."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(ENV_GROQ_KEY, FAKE_KEY)
+    for name in ENV_GEMINI_KEYS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(ENV_CACHE, str(tmp_path / "cache.sqlite"))
     monkeypatch.delenv(ENV_RPM, raising=False)
     monkeypatch.setattr(llm, "_LIMITERS", {})
@@ -88,10 +92,10 @@ def test_groq_spec_builds_a_rate_limited_cached_client(groq_env):
     model = get_chat_model("groq:qwen/qwen3-32b")
     assert isinstance(model, ChatGroq) and model.model_name == "qwen/qwen3-32b"
     assert model.temperature < 1e-6  # ChatGroq sends 1e-8 for 0; the API rejects exactly 0
-    assert model.groq_api_key.get_secret_value() == FAKE_KEY and model.max_retries == llm.GROQ_MAX_RETRIES
+    assert model.groq_api_key.get_secret_value() == FAKE_KEY and model.max_retries == llm.HOSTED_MAX_RETRIES
     assert model.reasoning_format == "hidden"  # Qwen3 <think> blocks would break JSON replies
     assert isinstance(model.cache, SQLiteChatCache) and model.cache.path == groq_env / "cache.sqlite"
-    assert model.rate_limiter.requests_per_second == pytest.approx(20 / 60)
+    assert model.rate_limiter.requests_per_second == pytest.approx(10 / 60)
 
 
 def test_all_groq_models_share_one_rate_limiter(groq_env):
@@ -180,3 +184,32 @@ def test_cache_round_trips_any_prompt_and_answer(prompt, llm_string, answer):
         cache.update(prompt, llm_string, [ChatGeneration(message=AIMessage(answer))])
         [gen] = cache.lookup(prompt, llm_string)
         assert gen.message.content == answer
+
+
+# --- Gemini provider --------------------------------------------------------------------
+
+def test_gemini_spec_builds_a_rate_limited_cached_client(groq_env, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
+    model = get_chat_model("gemini:gemini-2.5-flash")
+    assert isinstance(model, ChatGoogleGenerativeAI) and model.model == "gemini-2.5-flash" and model.temperature == 0
+    assert model.google_api_key.get_secret_value() == FAKE_KEY and model.max_retries == llm.HOSTED_MAX_RETRIES
+    assert isinstance(model.cache, SQLiteChatCache) and FAKE_KEY not in model._get_llm_string()
+    # one budget per provider: Gemini models share theirs, Groq has its own
+    assert model.rate_limiter is get_chat_model("gemini:gemini-2.5-flash-lite").rate_limiter
+    assert model.rate_limiter is not get_chat_model("groq:llama-3.1-8b-instant").rate_limiter
+
+
+def test_gemini_accepts_google_api_key_and_dotenv(groq_env):
+    (groq_env / ".env").write_text("GOOGLE_API_KEY=from_file\n")
+    assert get_chat_model("gemini:gemini-2.5-flash").google_api_key.get_secret_value() == "from_file"
+    embeddings = get_embeddings("gemini:gemini-embedding-001")
+    assert isinstance(embeddings, GoogleGenerativeAIEmbeddings) and embeddings.model.endswith("gemini-embedding-001")
+
+
+def test_gemini_without_a_key_fails_before_any_call(groq_env):
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        get_chat_model("gemini:gemini-2.5-flash")
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        get_embeddings("gemini:gemini-embedding-001")
+    with pytest.raises(ValueError):
+        get_chat_model("gemini:")
