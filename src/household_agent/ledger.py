@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS documents (
     correlation_id TEXT NOT NULL,
     ingested_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS statement_balances (
+    document_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    opening_balance_minor INTEGER NOT NULL,
+    closing_balance_minor INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS raw_rows (
     document_id TEXT NOT NULL,
     line_number INTEGER NOT NULL,
@@ -82,7 +90,7 @@ CREATE TABLE IF NOT EXISTS calculation_runs (
 );
 """
 
-_APPEND_ONLY_TABLES = ("documents", "raw_rows", "transactions", "calculation_runs")
+_APPEND_ONLY_TABLES = ("documents", "statement_balances", "raw_rows", "transactions", "calculation_runs")
 
 _TXN_COLUMNS = tuple(Transaction.model_fields)
 
@@ -160,6 +168,11 @@ class LedgerStore:
                     recon.status.value, recon.document_confidence, int(recon.unverified),
                     json.dumps([asdict(i) for i in recon.issues]), correlation_id, at.isoformat(),
                 ),
+            )
+            self.conn.execute(
+                "INSERT INTO statement_balances VALUES (?,?,?,?,?,?)",
+                (document_id, h.account_id, h.period_start.isoformat(), h.period_end.isoformat(),
+                 h.opening_balance_minor, h.closing_balance_minor),
             )
             raw = [(r.line_number, r.raw_text) for r in parsed.rows] + [(e.line_number, e.raw_text) for e in parsed.row_errors]
             self.conn.executemany(
@@ -284,6 +297,43 @@ class LedgerStore:
             params.append(merchant_normalized)
         cur = self.conn.execute(sql + " ORDER BY t.posted_at, t.transaction_id", params)
         return [Transaction(**dict(zip(_TXN_COLUMNS, r, strict=True))) for r in cur]
+
+    def verified_statements(
+        self,
+        actor: Actor,
+        purpose: str,
+        correlation_id: str,
+        account_ids: Sequence[str],
+        start: date,
+        end: date,
+        *,
+        at: datetime | None = None,
+    ) -> list[dict]:
+        """Statements fully inside ``[start, end]`` that passed reconciliation, newest first.
+
+        Same eligibility as ``query_transactions``: ``reconciled`` and at or above the confidence
+        threshold. A statement whose stated closing balance did not reconcile never supplies a
+        balance.
+        """
+        at = at or datetime.now(UTC)
+        for account_id in account_ids:
+            self._require(actor, account_id, Action.READ, purpose, correlation_id, at)
+        cur = self.conn.execute(
+            f"""
+            SELECT b.document_id, b.account_id, b.period_start, b.period_end,
+                   b.opening_balance_minor, b.closing_balance_minor
+            FROM statement_balances b JOIN documents d ON d.document_id = b.document_id
+            WHERE b.account_id IN ({','.join('?' * len(account_ids))})
+              AND b.period_start >= ? AND b.period_end <= ?
+              AND d.reconciliation_status = ? AND d.document_confidence >= ?
+            ORDER BY b.period_end DESC, b.document_id
+            """,
+            [*account_ids, start.isoformat(), end.isoformat(), ReconciliationStatus.RECONCILED.value,
+             CONFIDENCE_THRESHOLD],
+        )
+        cols = ("document_id", "account_id", "period_start", "period_end", "opening_balance_minor",
+                "closing_balance_minor")
+        return [dict(zip(cols, r, strict=True)) for r in cur]
 
     def document_status(self, document_id: str) -> dict:
         cur = self.conn.execute(
