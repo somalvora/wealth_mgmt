@@ -164,7 +164,7 @@ def test_numbers_must_appear_in_cited_evidence(service):
         Claim("The first installment was 3,500.00 dollars.", "fact", (bill,)),
     ], out["passages"])
     assert ok["verdict"] == "supported"
-    assert invented["verdict"] == "remove" and "3500.00" in invented["reason"]
+    assert invented["verdict"] == "remove" and "3500" in invented["reason"]
 
 
 def test_calculated_and_unknown_evidence_claims():

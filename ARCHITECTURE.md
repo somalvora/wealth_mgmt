@@ -48,6 +48,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
 | `household_agent.tools` | `ToolSession`: identity/purpose bound by the host, call budget, structured errors, session-scoped transaction IDs | 3.2, 4.1 | all Ledger Analyst tools |
 | `household_agent.mcp_server` | `household-finance-tools` FastMCP stdio server over `ToolSession`; identity from env | 3.2, 4.2 | (MCP transport) |
+| `household_agent.agents` | `Supervisor` graph (classify → dispatch loop → threshold → compose), `LedgerAnalyst` and `PolicyCompliance` ReAct subgraphs, `Router`, typed `TaskAssignment`/`AgentResult` | 4, 5.1 | (the agents) |
 | `household_agent.retrieval` | `RetrievalService` over ChromaDB: authorize-first `where` filters, MMR, per-passage verification, audit; `validate_claims` | 8 | `retrieve_verified`, `validate_claims` |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 
@@ -187,6 +188,31 @@ validate_claims(claims, passages, calc_outputs) → supported | remove | rephras
   - Numbers in a claim must appear in the cited verified evidence or calculation output.
   - Citing anything not retrieved in this job removes the claim.
 
+## 4e. Supervisor and specialists (`agents.py`)
+
+```
+request ─► classify (Router: model JSON → RoutingDecision, else rule_route)
+             ├─ external action ─► refuse (audited deny) ─────────────┐
+             ├─ allocation ─► plan: start approval graph (interrupt) ─┤
+             └─ dispatch loop (≤ 8, ≤ 300 s) ─► threshold ─► compose ◄┘
+                  │ TaskAssignment(purpose from intent, scope from host)
+                  ▼
+        specialist subgraph: agent ⇄ tools (≤ 6 calls, ≤ 2 retries/tool)
+                  │ outputs/evidence copied from observations
+                  │ claims re-checked by validate_claims
+                  ▼
+        AgentResult(status, outputs, evidence_ids, claims, questions, errors)
+```
+
+- **Ledger Analyst.** Its tools are `list_accounts`, `query_ledger` and `run_calculation`, through a `ToolSession`. Claims may cite only the transaction IDs and calculation run IDs from this assignment, and `*_minor` values are also matched in dollar form ("$450.00").
+- **Policy & Compliance.** Its tool is `retrieve_verified`, allowing 1 search plus 2 refinements. Claims are validated against the passages from this assignment and against calculation outputs the Supervisor passed in as run IDs. `rephrase_as_question` verdicts become questions; `remove` verdicts are dropped and recorded as errors.
+- **Supervisor.**
+  - It never calls the ledger or the vector store.
+  - A specialist that raises an exception becomes a `failed` result.
+  - Any status other than `completed`, or any threshold finding, makes the job `needs_review`.
+  - Each step is audited under the job's correlation ID: `route`, `dispatch`, `threshold_check` and `compose_briefing`.
+- **Model binding.** `bind_tools` is used when the model supports it; otherwise the plain model is used (fake models in tests).
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -247,11 +273,14 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Model invents numbers in a briefing | `validate_claims` removes claims whose numbers aren't in the cited evidence | `retrieval.py` |
 | Prompt injection in documents | Instruction-like chunks flagged at indexing and audited at retrieval; text treated as data | `retrieval.py` |
 | Index tampering | Per-chunk hash re-checked at retrieval → `hash_mismatch` | `retrieval.py` |
+| Model asserts unsupported numbers | Specialist claims re-validated; outputs copied from tools | `agents.py` |
+| Model routes to an unknown agent or plans a payment | Pydantic `Literal` allowlist, ≤ 8 dispatches, external-action flag can't be cleared by the model | `agents.py` |
+| Runaway agent loops | Per-assignment tool/retry/refinement budgets, job dispatch and time limits, LangGraph recursion limit | `agents.py` |
 | Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) and verified retrieval (`retrieval.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`) and the Supervisor with both specialists (`agents.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
