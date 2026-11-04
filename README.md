@@ -51,6 +51,13 @@ What's in Phase 2 so far:
    - **Supervisor budgets.** At most 8 dispatches and 5 minutes per job. Requests to pay or transfer are refused. Allocation requests start the approval graph and pause.
    - **Router.** A model router with a keyword fallback. The purpose comes from the intent and the identity from the host, never from the model.
    - **Briefing.** Deterministic. It contains only validated claims, open questions and threshold findings (e.g. a property-tax variance over 10%).
+8. **Planner inputs from the ledger** (`plan_inputs.py`). `derive_planning_inputs` builds the planner's numbers from data the requesting member may read, never from model text.
+   - **Liquid cash.** The closing balance of the latest verified statement (reconciled, confidence ≥ 0.85) of each checking and savings account in a 3-month window. Closing balances are now stored at ingest in the append-only `statement_balances` table.
+   - **Monthly essentials.** Per account, mortgage, rent, utilities, groceries, HOA dues and insurance come from a recorded `category_totals` run, divided by the number of verified months and rounded up. Property tax is excluded because it is lumpy; it enters as an explicit liability.
+   - **Liabilities.** Each explicit liability needs an evidence ID (e.g. the county tax bill). Money owed on verified card statements is added.
+   - **Exclusions.** Accounts the member can't read for `capital_allocation`, or that have no verified statement, are left out and listed. The inputs are then `complete=False`.
+   - **Recorded runs.** `plan_from_ledger` stores every plan in `calculation_runs` (`fn="plan_allocation"`). The run carries the planner's input hash and all evidence IDs, is marked provisional if any account was left out, and is audited.
+   - **Approval wiring.** `ledger_inputs_for` re-derives the inputs on every call. If a new statement lands between showing a plan and approving it, the approval ends `stale`.
 
 ## Quick start
 
@@ -101,6 +108,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL), HashEmbeddings
   consent.py               Persistent, append-only consent grants and revocations
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
+  plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
   agents.py                Supervisor + Ledger Analyst + Policy & Compliance (LangGraph), typed handoffs, budgets
@@ -137,8 +145,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_retrieval.py` | 22 | Private doc never a candidate for another member, consent grant/revocation take effect immediately (purpose-scoped), delegate public-only, dependent nothing, household isolation, missing purpose/query rejected, forged indexing denied, expired source not citable, tax-year pre-filter, Tier-1-same-year tax rule, invented numbers removed, calculated/unknown-evidence claims, injection flagged and audited, tampered chunk detected, statement chunking, period filter, heading split, chunk-window and MMR properties (hypothesis) |
 
 | `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
+| `test_plan_inputs.py` | 17 | Liquid cash, essentials and liabilities from verified statements (hand-computed), evidence IDs cover documents/runs/liabilities, plan run recorded with the planner's input hash and audited, reproducible hash, card balance owed becomes a liability, multi-month average rounds up, Jordan never sees Alex's private balance, dependent gets not_eligible, corrupt and out-of-window statements ignored, `statement_balances` append-only, invalid liabilities (3 cases), other household rejected, new statement makes approval `stale`, month-window and liability-sum properties (hypothesis) |
 
-Total: **186 passing**.
+Total: **203 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -172,7 +181,7 @@ These parts of the design are not implemented yet:
 - **Agents and orchestration.** The LangGraph supervisor and specialist agents, are next in Phase 2. The approval graph, MCP tools and retrieval are not yet wired to the supervisor. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
-  - Planning inputs are not yet derived from the ledger, and planner runs are not yet stored as `calculation_runs`.
+  - Planning inputs are derived from the ledger (`plan_inputs.py`), but the demo's step 5 still uses the fixed synthetic inputs. Contribution room and return assumptions are still passed in rather than retrieved.
   - The LLM persona generator and the critic arrive in Phase 2.
 
 ## Data policy

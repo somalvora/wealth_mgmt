@@ -51,6 +51,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.agents` | `Supervisor` graph (classify → dispatch loop → threshold → compose), `LedgerAnalyst` and `PolicyCompliance` ReAct subgraphs, `Router`, typed `TaskAssignment`/`AgentResult` | 4, 5.1 | (the agents) |
 | `household_agent.retrieval` | `RetrievalService` over ChromaDB: authorize-first `where` filters, MMR, per-passage verification, audit; `validate_claims` | 8 | `retrieve_verified`, `validate_claims` |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
+| `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
 
 ## 3. Data flow: ingesting a statement
 
@@ -142,6 +143,29 @@ start_request(household, requested_by) ─► plan ─► plan_allocation ─►
 - **Checkpoints.** `SqliteSaver` needs **its own connection and file**. It manages its own transactions and can write from a worker thread, so sharing the ledger/audit connection fails intermittently ("cannot commit - no transaction is active").
 - **Re-execution.** On resume, LangGraph re-runs the `approval` node from the top. That's why the node has no side effects before `interrupt()`.
 
+## 4b-2. Planner inputs from the ledger (`plan_inputs.py`)
+
+```
+actor, as_of ─► window = [first of month (as_of − 3 months), as_of]
+   for each household account:
+     not READ-able for capital_allocation ─► excluded
+     verified_statements (reconciled, confidence ≥ 0.85, period inside window)
+        none ─► excluded
+        latest closing: checking/savings → liquid += max(closing, 0)
+                        credit_card      → liabilities += max(−closing, 0)
+        query_transactions over the statements' span ─► category_totals run (recorded)
+        monthly_essential += ceil(essential outflow / verified months)
+   PlanningInputs(liquid, monthly_essential, explicit liabilities + card owed, room, assumptions)
+   ─► plan_allocation ─► record_plan_run: calculation_runs(fn="plan_allocation",
+          input_hash = planner hash, input_ids = docs + calc runs + liability/limits evidence,
+          provisional = any account excluded) + audit "calculate"
+```
+
+- **No model numbers.** Every input amount is a stored closing balance, a recorded calculation output, or an explicit liability with an evidence ID.
+- **Essentials.** mortgage, rent, utilities, groceries, hoa_dues and insurance. Property tax is excluded on purpose; the next installment is passed as a liability.
+- **Privacy.** A member's plan uses only accounts they may read. Jordan's plan leaves out Alex's private checking, and the run says so.
+- **Stale approvals.** `ledger_inputs_for` is the approval graph's `inputs_for`. It re-derives on resume, so a newly verified statement changes the input hash and the approval ends `stale`.
+
 ## 4c. Tool calls: agents and MCP clients (`tools.py`, `mcp_server.py`)
 
 ```
@@ -220,6 +244,7 @@ All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers rai
 | Table | Key | Notes |
 |---|---|---|
 | `documents` | `document_id` | `source_hash` UNIQUE, status, confidence, issues JSON |
+| `statement_balances` | `document_id` | Account, period, opening/closing balance in cents, written at ingest in the same transaction |
 | `raw_rows` | (`document_id`, `line_number`) | Exact source text for provenance |
 | `transactions` | (`transaction_id`, `version`) | Corrections insert `version + 1` with `correction_reason` |
 | `calculation_runs` | `run_id` | fn, params, input IDs, hashes, library version, provisional |
@@ -280,7 +305,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`) and the Supervisor with both specialists (`agents.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), and ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
@@ -298,6 +323,6 @@ Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), 
   - Wrap `plan_allocation` as a Supervisor subgraph whose three persona prompts emit `pydantic`-validated `AllocationStep`s. CrewAI is not used.
   - Evaluate each depth in one batched `evaluate_allocation_candidates` call.
   - Fetch contribution limits once per job via `retrieve_verified`.
-  - Derive `PlanningInputs` from reconciled ledger balances.
-  - Record each run in `calculation_runs`, then `interrupt()` for approval.
+  - Derive `PlanningInputs` from reconciled ledger balances. **Done** (`plan_inputs.py`).
+  - Record each run in `calculation_runs`, then `interrupt()` for approval. **Done** (`record_plan_run`, `ledger_inputs_for`).
   - Target p95 ≤ 120 s on the local 7B model, at most 5 generation calls.
