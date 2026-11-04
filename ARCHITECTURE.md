@@ -48,6 +48,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
 | `household_agent.tools` | `ToolSession`: identity/purpose bound by the host, call budget, structured errors, session-scoped transaction IDs | 3.2, 4.1 | all Ledger Analyst tools |
 | `household_agent.mcp_server` | `household-finance-tools` FastMCP stdio server over `ToolSession`; identity from env | 3.2, 4.2 | (MCP transport) |
+| `household_agent.retrieval` | `RetrievalService` over ChromaDB: authorize-first `where` filters, MMR, per-passage verification, audit; `validate_claims` | 8 | `retrieve_verified`, `validate_claims` |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 
 ## 3. Data flow: ingesting a statement
@@ -155,6 +156,37 @@ host authenticates user ─► ToolSession(store, actor, purpose, correlation_id
 - **Error types.** `authorization_denied`, `budget_exhausted`, `ineligible_input`, `duplicate_document`, `invalid_statement`, `calculation_error`, `invalid_request`. Unknown tools and bad arguments are `invalid_request`, never exceptions.
 - **MCP identity.** The MCP server reads `HH_ACTOR` / `HH_PURPOSE` once at startup and refuses to start if they're missing or unknown. The tool schemas contain no identity fields; a test asserts this.
 
+## 4d. Verified retrieval (`retrieval.py`)
+
+```
+actor + purpose + query
+   │ (purpose and query required → else RetrievalRequestError)
+   ▼
+Authorizer: accounts the actor may RETRIEVE for this purpose (+ PUBLIC; dependents: none)
+   ▼
+Chroma query on {household}__{collection}, where = household_id AND account_id ∈ scopes
+   AND document_status = active [AND jurisdiction ∈ … AND (effective_tax_year ∈ years OR 0)]
+   [AND statement_period ∈ …]          ── up to 20 candidates
+   ▼
+MMR (λ = 0.65) → up to 5 passages
+   ▼
+verify each: chunk_hash matches text? valid_until / effective_to passed? tax year matches?
+   → verified | hash_mismatch | expired | wrong_period
+   ▼
+audit (scopes, candidate IDs, selected IDs, outcomes, instruction-like chunks)
+   ▼
+validate_claims(claims, passages, calc_outputs) → supported | remove | rephrase_as_question
+```
+
+- **Filter, don't redact.** Unauthorized chunks never enter the candidate set, so nothing has to be removed afterwards and nothing leaks through ranking.
+- **Embeddings.** These always come from `llm.get_embeddings()`. Collections are created with `embedding_function=None`, so Chroma never downloads its default ONNX model.
+- **Indexing.** Indexing a document needs `index` permission on its account. `PUBLIC` documents must be Tier 1 and indexed by an adult.
+- **Chunking.** Documents split on headings first, then into 500-word windows with 100-word overlap. Statements are split into 25-row groups, each with the header repeated.
+- **Claims.**
+  - A tax claim needs a verified Tier-1 passage whose `effective_tax_year` equals the claim's year. Otherwise it becomes a question carrying the standard "cannot verify" sentence.
+  - Numbers in a claim must appear in the cited verified evidence or calculation output.
+  - Citing anything not retrieved in this job removes the claim.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -169,7 +201,7 @@ All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers rai
 | `consent_grants` | `grant_id` | Grantor, grantee, accounts/actions/purposes JSON, effective/expiry, version |
 | `consent_revocations` | `grant_id` | A revocation is a new row (`revoked_by`, `revoked_at`), never an edit |
 
-LangGraph checkpoints are kept in a separate database (`checkpoints.db`) managed by `SqliteSaver`.
+LangGraph checkpoints are kept in a separate database (`checkpoints.db`) managed by `SqliteSaver`. The vector index lives in a ChromaDB directory. Chunk metadata includes `household_id`, `account_id` (or `PUBLIC`), `authority_tier`, `effective_tax_year` (0 = n/a), `valid_until`, `chunk_hash`, `source_hash` and `injection_suspect`.
 
 `transaction_id = "txn_" + row_hash[:16]`. The row hash covers the account, date, amount, description and an **occurrence index**, so two genuinely identical charges still get distinct IDs.
 
@@ -210,11 +242,16 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Model impersonates another member | Actor/purpose bound in `ToolSession`/server env; not in tool schemas | `tools.py`, `mcp_server.py` |
 | Model invents calculation inputs | `run_calculation` takes only IDs this session queried | `tools.py` |
 | Runaway tool loops | Per-session `max_calls` budget → `budget_exhausted` | `tools.py` |
+| Retrieval leaks another member's document | Authorizer-derived `account_id ∈ scopes` filter applied before search | `retrieval.py` |
+| Stale or wrong-year tax rule cited | Expiry/tax-year verification; tax claims need a Tier-1 source for the same year | `retrieval.py` |
+| Model invents numbers in a briefing | `validate_claims` removes claims whose numbers aren't in the cited evidence | `retrieval.py` |
+| Prompt injection in documents | Instruction-like chunks flagged at indexing and audited at retrieval; text treated as data | `retrieval.py` |
+| Index tampering | Per-chunk hash re-checked at retrieval → `hash_mismatch` | `retrieval.py` |
 | Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`) and the stdio MCP server (`mcp_server.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) and verified retrieval (`retrieval.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.

@@ -36,6 +36,14 @@ What's in Phase 2 so far:
    - Each session has a call budget.
    - Errors come back as data (`authorization_denied`, `ineligible_input`, `budget_exhausted`, …).
 5. **MCP server** (`mcp_server.py`). `household-finance-tools` is a stdio server that wraps `ToolSession`. Its identity comes from the environment (`HH_LEDGER_DB`, `HH_ACTOR`, `HH_PURPOSE`), so one process serves one authenticated user.
+6. **Verified retrieval** (`retrieval.py`). ChromaDB keeps one collection per household and type (`financial_history`, `policies_compliance`).
+   - Access control happens **before** similarity search. The authorizer lists the accounts the actor may `retrieve` for the stated purpose, and that list becomes a mandatory Chroma `where` filter. Another member's private document is never even a candidate, and revoking consent takes effect on the next query.
+   - Delegates see only public Tier-1 sources (`PUBLIC` scope). Dependents see nothing.
+   - The search returns up to 20 candidates. MMR (λ = 0.65) picks up to 5 passages, and each is checked: chunk hash, expiry and tax year.
+   - `validate_claims` rules each claim `supported`, `remove` or `rephrase_as_question`:
+     - A tax claim needs a verified Tier-1 source for the same tax year. Otherwise it gets the standard "cannot verify the rule for this tax year" sentence.
+     - Every number in a claim must appear in its cited evidence.
+   - Text that looks like an instruction (e.g. "ignore previous instructions") is flagged and audited as a data-quality finding. It is never followed.
 
 ## Quick start
 
@@ -88,6 +96,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
+  retrieval.py             ChromaDB verified retrieval (authorize-first filters, MMR, verification) + validate_claims
   synthetic.py             Demo household, accounts, rules, statements
   demo.py                  `python -m household_agent.demo`
 scripts/                   generate_synthetic_data.py
@@ -115,11 +124,11 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_llm.py` | 9 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis) |
 | `test_consent.py` | 15 | Joint all-owner grants, grants and revocations survive a restart, 9 invalid-grant denials audited, grantor-only revocation, append-only tables |
 | `test_approval.py` | 15 | Interrupt payload, approve/reject, non-approvers denied while the graph keeps waiting, other household denied, stale inputs, not-eligible ends early, restart resume (repeated 5×) |
-
 | `test_tools.py` | 14 | Property-tax variance through the tools, ownership/consent/purpose-scoped account listing, denial audited, actor can't be passed as an argument, invented transaction IDs rejected, provisional opt-in, budget, 6 bad-request cases, ingest guards |
 | `test_mcp_server.py` | 8 | Tool list has no identity arguments, query + calculate over MCP, denial as data, `langchain-mcp-adapters` tools, server refuses to start without an identity (3 cases), real stdio subprocess end to end |
+| `test_retrieval.py` | 22 | Private doc never a candidate for another member, consent grant/revocation take effect immediately (purpose-scoped), delegate public-only, dependent nothing, household isolation, missing purpose/query rejected, forged indexing denied, expired source not citable, tax-year pre-filter, Tier-1-same-year tax rule, invented numbers removed, calculated/unknown-evidence claims, injection flagged and audited, tampered chunk detected, statement chunking, period filter, heading split, chunk-window and MMR properties (hypothesis) |
 
-Total: **137 passing**.
+Total: **159 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -150,7 +159,7 @@ These parts of the design are not implemented yet:
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
 - **Statement formats.** There is no PDF/OCR ingestion; only the CSV format above is supported.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
-- **Agents and orchestration.** The LangGraph supervisor and specialist agents, ChromaDB retrieval and the MCP server are next in Phase 2. The approval graph and MCP tools are not yet wired to the supervisor. Accounts and members for the MCP server still come from the synthetic household.
+- **Agents and orchestration.** The LangGraph supervisor and specialist agents, are next in Phase 2. The approval graph, MCP tools and retrieval are not yet wired to the supervisor. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are not yet derived from the ledger, and planner runs are not yet stored as `calculation_runs`.
