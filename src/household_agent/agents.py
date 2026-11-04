@@ -152,7 +152,7 @@ LEDGER_TOOLS = [
         {"account_ids": _STR_LIST, "start": {"type": "string"}, "end": {"type": "string"},
          "merchant": {"type": "string"}, "include_provisional": {"type": "boolean"}},
         ["account_ids", "start", "end"]),
-    _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions or recurring_drift.",
+    _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions, recurring_drift or cluster_risk.",
         {"fn": {"type": "string"}, "transaction_ids": _STR_LIST, "params": {"type": "object"},
          "allow_provisional": {"type": "boolean"}}, ["fn", "transaction_ids"]),
 ]

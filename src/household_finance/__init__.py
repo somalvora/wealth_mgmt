@@ -15,8 +15,9 @@ from household_finance.calcs import (
     variance,
 )
 from household_finance.money import MoneyError, format_minor, percent, to_minor
+from household_finance.risk import RISK_RULES_VERSION, RiskAlert, cluster_risk
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AmortizationRow",
@@ -25,11 +26,14 @@ __all__ = [
     "DriftFinding",
     "MoneyError",
     "NetWorth",
+    "RISK_RULES_VERSION",
+    "RiskAlert",
     "Variance",
     "__version__",
     "amortization_schedule",
     "cash_flow",
     "category_totals",
+    "cluster_risk",
     "format_minor",
     "net_worth_snapshot",
     "percent",

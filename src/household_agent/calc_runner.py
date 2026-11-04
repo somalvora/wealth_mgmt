@@ -37,11 +37,20 @@ def _drift(txns: Sequence[Transaction], params: dict) -> Any:
     return hf.recurring_drift([t for t in txns if t.posted_at < split], [t for t in txns if t.posted_at >= split])
 
 
+def _cluster(txns: Sequence[Transaction], params: dict) -> Any:
+    """Transactions before ``start`` are the baseline; alerts carry transaction IDs."""
+    split, end = date.fromisoformat(params["start"]), date.fromisoformat(params["end"])
+    current = [t for t in txns if split <= t.posted_at <= end]
+    return [{**dataclasses.asdict(a), "transaction_ids": [current[i].transaction_id for i in a.entry_indexes]}
+            for a in hf.cluster_risk(current, [t for t in txns if t.posted_at < split])]
+
+
 REGISTRY: dict[str, Callable[[Sequence[Transaction], dict], Any]] = {
     "cash_flow": lambda t, p: hf.cash_flow(t, date.fromisoformat(p["start"]), date.fromisoformat(p["end"])),
     "category_totals": lambda t, p: hf.category_totals(t, date.fromisoformat(p["start"]), date.fromisoformat(p["end"])),
     "variance_between_transactions": _variance_between,
     "recurring_drift": _drift,
+    "cluster_risk": _cluster,
 }
 
 

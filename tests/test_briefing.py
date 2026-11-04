@@ -69,7 +69,7 @@ def test_alex_october_figures_are_hand_computed(seeded_store):
 def test_calculations_are_recorded_and_the_briefing_is_audited(seeded_store):
     b = _brief(seeded_store)
     rows = seeded_store.conn.execute("SELECT run_id FROM calculation_runs").fetchall()
-    assert set(b.calc_run_ids) <= {r[0] for r in rows} and len(b.calc_run_ids) == 2
+    assert set(b.calc_run_ids) <= {r[0] for r in rows} and len(b.calc_run_ids) == 3
     event = next(e for e in seeded_store.audit.events("brief") if e["action"] == "compose_briefing")
     assert event["resource"] == "briefing:2026-10" and json.loads(event["details_json"])["calc_run_ids"] == b.calc_run_ids
 
