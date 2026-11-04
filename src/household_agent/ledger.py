@@ -335,6 +335,39 @@ class LedgerStore:
                 "closing_balance_minor")
         return [dict(zip(cols, r, strict=True)) for r in cur]
 
+    def document_coverage(
+        self,
+        actor: Actor,
+        purpose: str,
+        correlation_id: str,
+        account_ids: Sequence[str],
+        start: date,
+        end: date,
+        *,
+        at: datetime | None = None,
+    ) -> list[dict]:
+        """Every statement overlapping ``[start, end]``, in any reconciliation state, oldest first.
+
+        Status metadata only (no balances or rows), so a briefing can report coverage and
+        exceptions without using unverified numbers.
+        """
+        at = at or datetime.now(UTC)
+        for account_id in account_ids:
+            self._require(actor, account_id, Action.READ, purpose, correlation_id, at)
+        cur = self.conn.execute(
+            f"""
+            SELECT document_id, account_id, source_name, period_start, period_end, reconciliation_status,
+                   document_confidence, unverified, issues_json
+            FROM documents
+            WHERE account_id IN ({','.join('?' * len(account_ids))}) AND period_start <= ? AND period_end >= ?
+            ORDER BY period_start, account_id, document_id
+            """,
+            [*account_ids, end.isoformat(), start.isoformat()],
+        )
+        cols = ("document_id", "account_id", "source_name", "period_start", "period_end", "status",
+                "document_confidence", "unverified", "issues")
+        return [{**dict(zip(cols, r, strict=True)), "unverified": bool(r[7]), "issues": json.loads(r[8])} for r in cur]
+
     def document_status(self, document_id: str) -> dict:
         cur = self.conn.execute(
             "SELECT reconciliation_status, document_confidence, unverified, issues_json FROM documents WHERE document_id = ?",

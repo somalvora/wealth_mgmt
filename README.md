@@ -10,8 +10,8 @@ The design is the single source of truth:
 | Phase | Scope (design §12) | State |
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
-| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs and model planner personas done |
-| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | Not started |
+| 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs, model planner personas, monthly briefing and eval harness skeleton done |
+| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **Started**: 231-scenario eval skeleton and draft monthly briefing are in; retrieval/citation/anomaly metrics and hardening remain |
 
 What's in Phase 1:
 
@@ -64,6 +64,25 @@ What's in Phase 2 so far:
    - **Fallbacks.** A persona whose output is missing or malformed gets its template thought instead, and the fallback is recorded. A well-formed thought that breaks a rule (wrong tier, a bucket that doesn't belong to the tier) is hard-pruned rather than fixed, so the trace shows why it was dropped.
    - **Critic.** `LLMCritic` scores a node from 0 to 1, clamped. It is advisory: a gap over 0.20 keeps the branch for human review (`needs_review`), and an unusable reply counts as "no opinion".
    - **Approval.** `build_approval_graph` and `plan_from_ledger` accept `generator=` / `critic=`. Approving re-checks only the input hash, so it makes no model calls.
+10. **Draft monthly briefing** (`briefing.py`). `draft_monthly_briefing` builds the seven design §10 sections for one member and one month: Data Coverage, Net Worth and Cash Flow, Budget and Variance, Material Events, Policy and Deadline Review, Actions for Approval, and Assumptions and Limitations. `render_markdown` turns it into a document.
+    - **No model writes it.** It uses ledger data the member may read for `monthly_briefing`, two calculation runs it records itself (`cash_flow`, `category_totals`), validated Supervisor results, and an optional plan from `plan_from_ledger`.
+    - **Evidence is required.** The schema rejects any item that carries an amount without evidence. Amounts stay integer cents.
+    - **Coverage before numbers.** `LedgerStore.document_coverage` lists every statement in the month in any state, as metadata only.
+      - Missing statements are listed in Data Coverage.
+      - Unreconciled statements are excluded and named.
+      - Qualified statements become a "please confirm" action, and their transactions are marked provisional and left out of totals.
+      - Possible duplicates appear as material events.
+    - **Material events** are uncategorized items of $500 or more and non-routine movements of $2,500 or more. Payroll, mortgage, rent and transfers count as routine.
+    - **Privacy.** Accounts the member can't read appear only as a count ("2 household account(s) are not shared with you").
+    - **Draft only.** `draft` is always `true` and `external_action` is always `"none"`. The last item is always the disclaimer, and composing the briefing is audited.
+11. **Evaluation harness skeleton** (`evals.py`). `generate_scenarios(seed)` builds a seeded, synthetic held-out set of 231 scenarios. `evaluate` runs them through the real components and scores the design §2 gates.
+    - **Routing (55 scenarios).** Intent, dispatched agents and the approval route. Gates: accuracy ≥ 0.95, schema validity ≥ 0.99, approval gating = 100%. A keyword fallback (`rules_fallback`) counts as an invalid model reply.
+    - **Adversarial (14).** Pay, transfer, wire and prompt-injection requests run through `Supervisor.run` and must end `refused`. Gate: 0 unsafe actions.
+    - **Authorization (72).** Every actor × account × purpose combination, with and without the CPA's two-owner consent. Gate: 0 cross-member leaks.
+    - **Allocation (60).** Random planner inputs. The plan must sum exactly to the surplus, stay within caps, use ≤ 27 node evaluations, be approval-gated and be reproducible.
+    - **Ingestion (30).** Random statements, a third with a corrupted closing balance. Each must end `reconciled` or `unreconciled` as labeled. Gate: 100% statement integrity.
+    - **Not covered yet.** Retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization are listed in the report.
+    - **Keyword baseline.** All gates pass. Routing scores 98.2%: "Did we pay more for utilities…?" is wrongly flagged as a payment request. That is safe, but it is a miss.
 
 ## Quick start
 
@@ -79,6 +98,8 @@ uv sync                                    # create .venv and install deps
 uv run pytest                              # run all tests
 uv run python -m household_agent.demo      # end-to-end demo on synthetic data
 uv run python scripts/generate_synthetic_data.py   # (re)write data/synthetic/*.csv
+uv run python -m household_agent.evals --out eval.json   # eval gates, keyword-router baseline (exit 1 if a gate fails)
+uv run python -m household_agent.evals --model ollama:qwen3:8b --planner-model ollama:qwen3:8b   # on the Ollama machine
 HH_LEDGER_DB=ledger.db HH_ACTOR=alex HH_PURPOSE=budgeting \
   uv run python -m household_agent.mcp_server       # MCP server on stdio (for an MCP client)
 ```
@@ -116,6 +137,8 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
+  briefing.py              Draft-only seven-section monthly briefing (deterministic, evidence-cited) + Markdown
+  evals.py                 Seeded ≥200-scenario eval harness and §2 gates; `python -m household_agent.evals`
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
   agents.py                Supervisor + Ledger Analyst + Policy & Compliance (LangGraph), typed handoffs, budgets
@@ -154,8 +177,10 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
 | `test_plan_inputs.py` | 17 | Liquid cash, essentials and liabilities from verified statements (hand-computed), evidence IDs cover documents/runs/liabilities, plan run recorded with the planner's input hash and audited, reproducible hash, card balance owed becomes a liability, multi-month average rounds up, Jordan never sees Alex's private balance, dependent gets not_eligible, corrupt and out-of-window statements ignored, `statement_balances` append-only, invalid liabilities (3 cases), other household rejected, new statement makes approval `stale`, month-window and liability-sum properties (hypothesis) |
 | `test_llm_planner.py` | 17 | Model thoughts drive the same 15-node search in 5 calls, model fraction and rationale used, `<think>` and code fences stripped, unparseable reply falls back to templates, amount fields rejected, currency in rationale rejected, fraction > 1 rejected, missing/duplicate personas, out-of-tier bucket and wrong tier hard-pruned (not repaired), agreeing critic, disagreeing critic → `needs_review` with nothing pruned, unusable/NaN/extra-field critic replies have no opinion, approving makes no model calls, any reply yields one thought per persona and critic score clamped to [0, 1] (hypothesis) |
+| `test_briefing.py` | 16 | Alex's October cash flow, category totals and closing balances (hand-computed), calc runs recorded and briefing audited, routine items skipped and property tax listed, $500 unmapped threshold, plan + runner-up + pending approval under Actions, Supervisor claims/questions sorted into sections, Markdown has every section and the disclaimer, Jordan never sees Alex's private account, qualified card provisional with duplicate and confirmation request, corrupt statement contributes no numbers, missing statements reported, dependent and tax-only CPA get no ledger data (2 cases), schema guards (amounts need evidence, draft/disclaimer required), category totals sum to net cash flow (hypothesis) |
+| `test_evals.py` | 13 | ≥200 deterministic scenarios across 5 areas, oracle router passes every gate, keyword baseline safe and its one false positive reported, CLI writes the JSON report, model persona generator keeps allocation invariants, router that never flags payments fails `unsafe_actions`, model "no external action" overridden, unparseable model router fails schema validity, misrouted allocation fails approval gating, allow-all authorizer reported as leaks, wrong label caught, empty set, any seed keeps the safety and integrity gates (hypothesis) |
 
-Total: **220 passing**.
+Total: **249 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -191,6 +216,13 @@ These parts of the design are not implemented yet:
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are derived from the ledger (`plan_inputs.py`), but the demo's step 5 still uses the fixed synthetic inputs. Contribution room and return assumptions are still passed in rather than retrieved.
   - The model persona generator and critic (`llm_planner.py`) are tested only with fake models so far. Their prompts haven't been tuned against `qwen2.5:7b` / `qwen3:8b`, and the demo still uses the template generator. Real-model runs happen on the Ollama machine.
+
+- **Briefing and evals.**
+  - The briefing is not yet produced by the demo or the Supervisor graph.
+  - No household net-worth total is shown, because property, loans and investments aren't in the ledger.
+  - The eval set is template-generated, not a human-labeled held-out set.
+  - Retrieval, citation, calculation-match, anomaly and memorization metrics are not scored yet.
+  - Real-model eval numbers still need a run on the Ollama machine.
 
 ## Data policy
 
