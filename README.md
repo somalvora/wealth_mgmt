@@ -28,11 +28,14 @@ What's in Phase 1:
 What's in Phase 2 so far:
 
 1. **Model configuration** (`llm.py`). `HH_CHAT_MODEL` (default `ollama:qwen2.5:7b`) and `HH_EMBED_MODEL` (default `ollama:nomic-embed-text`, or `hash` for offline) choose the models. No other module names a model, and **no test needs Ollama or a network**: tests use LangChain fake chat models and the deterministic `HashEmbeddings`.
-   - **Groq (hosted, synthetic data only).** `groq:<model>`, for example `groq:qwen/qwen3-32b` or `groq:llama-3.1-8b-instant`, uses Groq's free API, so real-model runs work on a laptop without a local LLM. The key comes from `GROQ_API_KEY` in the environment or a git-ignored `.env` (see `.env.example`).
-     - **One shared rate limiter** for every Groq model in the process, default 20 requests a minute (`HH_REQUESTS_PER_MINUTE`). 429 responses are retried up to 6 times.
+   - **Hosted models (synthetic data only)** let real-model runs work on a laptop without a local LLM. Keys come from the environment or a git-ignored `.env` (see `.env.example`).
+     - **Gemini (recommended).** `gemini:<model>`, for example `gemini:gemini-2.5-flash`, uses Google AI Studio's free tier with `GEMINI_API_KEY` (or `GOOGLE_API_KEY`). Any personal Google account can create a key. `gemini:gemini-embedding-001` gives real semantic embeddings for retrieval.
+     - **Groq.** `groq:<model>`, for example `groq:qwen/qwen3-32b`, with `GROQ_API_KEY`. Groq's sign-up rejected personal accounts ("does not belong to any organizations") when we tried it, so it's kept as an option.
+     - **One shared rate limiter per provider** for every model in the process, default 10 requests a minute (`HH_REQUESTS_PER_MINUTE`). 429 responses are retried up to 6 times.
      - **Answer cache** in `.cache/llm.sqlite` (`HH_LLM_CACHE`, `off` to disable), keyed by prompt, model settings and bound tools. Re-running an eval costs no calls; delete the file to re-sample. Messages are stored as plain dicts, never pickles, and the API key never enters the cache.
      - **Qwen3 reasoning hidden** (`reasoning_format="hidden"`) so `<think>` text can't break JSON replies.
-     - Groq has no embedding API, so retrieval still uses `hash` or Ollama embeddings.
+     - Groq has no embedding API; use `hash`, Ollama or Gemini embeddings.
+     - Replies are read with LangChain's `message.text`, so providers that return content blocks (Gemini) parse the same as plain strings.
 2. **Persistent consent** (`consent.py`). Grants and revocations are stored in append-only SQLite tables and reloaded on startup. Only the grantor can grant or revoke, and only for accounts they own. Every attempt is audited.
 3. **Approval workflow** (`approval.py`). A LangGraph graph plans an allocation, then pauses with `interrupt()` until a household admin or adult member approves or rejects it. The paused request is checkpointed with `SqliteSaver`, so it survives a restart. If the inputs changed since the plan was shown, the approval ends `stale`.
 4. **Agent tool layer** (`tools.py`). `ToolSession` exposes `list_accounts`, `query_ledger`, `run_calculation` and `ingest_statement`.
@@ -119,16 +122,17 @@ ollama pull qwen2.5:7b && ollama pull qwen3:8b && ollama pull nomic-embed-text
 export HH_CHAT_MODEL=ollama:qwen3:8b       # optional; default is ollama:qwen2.5:7b
 ```
 
- Without a local model, use Groq's free tier (synthetic data only). Create a key at console.groq.com, then:
+ Without a local model, use Gemini's free tier (synthetic data only). Create a key at aistudio.google.com → **Get API key**, then:
 
 ```bash
-cp .env.example .env                       # put GROQ_API_KEY=... in .env (git-ignored); never commit or paste it
-uv run python -m household_agent.vertical_slice --model groq:qwen/qwen3-32b
-uv run python -m household_agent.evals --model groq:qwen/qwen3-32b --planner-model groq:qwen/qwen3-32b --out eval_qwen3_32b.json
-uv run python -m household_agent.evals --model groq:llama-3.1-8b-instant --out eval_llama31_8b.json   # small-model comparison
+cp .env.example .env                       # put GEMINI_API_KEY=... in .env (git-ignored); never commit or paste it
+uv run python -m household_agent.vertical_slice --model gemini:gemini-2.5-flash --embed-model gemini:gemini-embedding-001
+uv run python -m household_agent.evals --model gemini:gemini-2.5-flash --planner-model gemini:gemini-2.5-flash \
+  --embed-model gemini:gemini-embedding-001 --out eval_gemini_flash.json
+uv run python -m household_agent.evals --model gemini:gemini-2.5-flash-lite --out eval_gemini_flash_lite.json   # smaller-model comparison
 ```
 
-Check the Groq console for the current model names and free-tier limits. If you see repeated 429 errors, lower `HH_REQUESTS_PER_MINUTE`.
+Check AI Studio for the current model names and free-tier limits. If you see repeated 429 errors, lower `HH_REQUESTS_PER_MINUTE`. `groq:<model>` works the same way with `GROQ_API_KEY`.
 
 ```bash
 uv sync                                    # create .venv and install deps
@@ -172,7 +176,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   calc_runner.py           Allowlisted calculation runner with provenance
   pipeline.py              parse → categorize → reconcile → persist
   planning.py              Tree-of-Thought beam-search planner (template generator)
-  llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL): Ollama or Groq, shared rate limiter, SQLite answer cache, HashEmbeddings
+  llm.py                   Model selection from env (HH_CHAT_MODEL / HH_EMBED_MODEL): Ollama, Gemini or Groq, shared rate limiter per provider, SQLite answer cache, HashEmbeddings
   consent.py               Persistent, append-only consent grants and revocations
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
@@ -209,14 +213,14 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_ingest_reconcile.py` | 11 | Parser provenance and errors; reconciled, qualified and unreconciled outcomes; duplicates, reversals, confidence |
 | `test_ledger_and_calcs.py` | 10 | Upload denial audited, re-import blocked, provisional and unreconciled filtering, versioned corrections, reproducible calculations |
 | `test_planning.py` | 17 | Allocation expansion and constraints, 15-node beam search, rollout scoring, liquidity tie-break, hard pruning, advisory critic |
-| `test_llm.py` | 22 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis); Groq client built with key, retries, hidden Qwen3 reasoning, cache and limiter (no network), one limiter shared by all Groq models, key and rate from `.env` without changing `os.environ`, cache can be turned off, cached answer replayed by a model with no answers left (also after reopening), tool calls survive the cache, API key absent from cache key and file, missing key fails before any call, zero/negative rate rejected, `groq:` without a name and Groq embeddings rejected, cache misses on other prompt/model and skips non-chat output, any prompt/answer round-trips (hypothesis) |
+| `test_llm.py` | 25 | Model spec parsing, env override, unsupported specs rejected, HashEmbeddings similarity, determinism (hypothesis); Groq client built with key, retries, hidden Qwen3 reasoning, cache and limiter (no network), one limiter shared by all Groq models, key and rate from `.env` without changing `os.environ`, cache can be turned off, cached answer replayed by a model with no answers left (also after reopening), tool calls survive the cache, API key absent from cache key and file, missing key fails before any call, zero/negative rate rejected, `groq:` without a name and Groq embeddings rejected, cache misses on other prompt/model and skips non-chat output, any prompt/answer round-trips (hypothesis); Gemini chat client built with key, retries and cache, one limiter per provider (Gemini models share, Groq separate), `GOOGLE_API_KEY` from `.env`, Gemini embeddings, missing Gemini key fails for chat and embeddings |
 | `test_consent.py` | 15 | Joint all-owner grants, grants and revocations survive a restart, 9 invalid-grant denials audited, grantor-only revocation, append-only tables |
 | `test_approval.py` | 15 | Interrupt payload, approve/reject, non-approvers denied while the graph keeps waiting, other household denied, stale inputs, not-eligible ends early, restart resume (repeated 5×) |
 | `test_tools.py` | 14 | Property-tax variance through the tools, ownership/consent/purpose-scoped account listing, denial audited, actor can't be passed as an argument, invented transaction IDs rejected, provisional opt-in, budget, 6 bad-request cases, ingest guards |
 | `test_mcp_server.py` | 8 | Tool list has no identity arguments, query + calculate over MCP, denial as data, `langchain-mcp-adapters` tools, server refuses to start without an identity (3 cases), real stdio subprocess end to end |
 | `test_retrieval.py` | 22 | Private doc never a candidate for another member, consent grant/revocation take effect immediately (purpose-scoped), delegate public-only, dependent nothing, household isolation, missing purpose/query rejected, forged indexing denied, expired source not citable, tax-year pre-filter, Tier-1-same-year tax rule, invented numbers removed, calculated/unknown-evidence claims, injection flagged and audited, tampered chunk detected, statement chunking, period filter, heading split, chunk-window and MMR properties (hypothesis) |
 
-| `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
+| `test_agents.py` | 28 | §9 property-tax trace end to end, router reads replies split into content blocks (Gemini style), outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
 | `test_plan_inputs.py` | 17 | Liquid cash, essentials and liabilities from verified statements (hand-computed), evidence IDs cover documents/runs/liabilities, plan run recorded with the planner's input hash and audited, reproducible hash, card balance owed becomes a liability, multi-month average rounds up, Jordan never sees Alex's private balance, dependent gets not_eligible, corrupt and out-of-window statements ignored, `statement_balances` append-only, invalid liabilities (3 cases), other household rejected, new statement makes approval `stale`, month-window and liability-sum properties (hypothesis) |
 | `test_llm_planner.py` | 17 | Model thoughts drive the same 15-node search in 5 calls, model fraction and rationale used, `<think>` and code fences stripped, unparseable reply falls back to templates, amount fields rejected, currency in rationale rejected, fraction > 1 rejected, missing/duplicate personas, out-of-tier bucket and wrong tier hard-pruned (not repaired), agreeing critic, disagreeing critic → `needs_review` with nothing pruned, unusable/NaN/extra-field critic replies have no opinion, approving makes no model calls, any reply yields one thought per persona and critic score clamped to [0, 1] (hypothesis) |
 | `test_briefing.py` | 16 | Alex's October cash flow, category totals and closing balances (hand-computed), 3 calc runs (incl. `cluster_risk`) recorded and briefing audited, routine items skipped and property tax listed, $500 unmapped threshold, plan + runner-up + pending approval under Actions, Supervisor claims/questions sorted into sections, Markdown has every section and the disclaimer, Jordan never sees Alex's private account, qualified card provisional with duplicate and confirmation request, corrupt statement contributes no numbers, missing statements reported, dependent and tax-only CPA get no ledger data (2 cases), schema guards (amounts need evidence, draft/disclaimer required), category totals sum to net cash flow (hypothesis) |
@@ -224,7 +228,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_eval_quality.py` | 17 | Cluster rules (7-day cluster, burst, card-testing probes) with hand-computed totals, runner splits baseline and returns transaction IDs, all four quality areas pass offline, cluster rules lift anomaly recall from 0.4 to 1.0, calculation oracle independent of the library, word-overlap check keeps a paraphrase and drops an unrelated source, no cluster rules → anomaly gate fails, wrong oracle value → calculation gate fails, a validator that trusts every citation fails precision, retrieval without scope filtering leaks and exposes canaries (retrieval + model prompts), allow-all authorizer exposes canaries in briefings and tools, baseline/categorized/credit rows never alert, strict limits ($300.00 exactly, 9 per day, 2 probes, 8 days late), every alert meets its rule and a full baseline silences all (hypothesis), any seed scores numbers and anomalies perfectly (hypothesis) |
 | `test_vertical_slice.py` | 12 | All 14 §12 checks pass offline, calc run → transactions → source hashes → correlation ID, artifacts kept in the workdir (briefing has the variance and pending approval, no private card), resume doesn't re-run planning, CLI report and exit code, model-factory path (router + specialists), a ledger model that skips its tools fails the trace while every guardrail check still passes, a router that hides a transfer is still refused, a misrouted allocation request fails the approval check without crashing, empty/failed reports not passed, playback past its script, any correlation ID tags every job event (hypothesis) |
 
-Total: **291 passing**.
+Total: **295 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -267,8 +271,8 @@ These parts of the design are not implemented yet:
   - The eval set is template-generated, not a human-labeled held-out set.
   - Membership inference is not scored (no fine-tuned model). The canary test covers runtime surfaces only.
   - Retrieval eval numbers use offline hash embeddings; `nomic-embed-text` numbers need the Ollama machine.
-  - Real-model eval numbers still need a run, either with Groq (`GROQ_API_KEY`) or on the Ollama machine. The Groq client is tested only offline so far; tool calling with Qwen3 and hidden reasoning has not been checked against the live API.
+  - Real-model eval numbers still need a run, either with Gemini (`GEMINI_API_KEY`), Groq or on the Ollama machine. The hosted clients are tested only offline so far; tool calling has not been checked against the live APIs.
 
 ## Data policy
 
-Use **synthetic data only** until encryption at rest lands. Never commit real statements; `*.db`, `*.sqlite`, `.env` and `.cache/` are git-ignored. Hosted models (Groq) must only ever see synthetic data: their free tiers are outside the household-controlled environment (design §11).
+Use **synthetic data only** until encryption at rest lands. Never commit real statements; `*.db`, `*.sqlite`, `.env` and `.cache/` are git-ignored. Hosted models (Gemini, Groq) must only ever see synthetic data: their free tiers are outside the household-controlled environment, and Google may use free-tier prompts to improve its products (design §11).

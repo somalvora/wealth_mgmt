@@ -3,18 +3,20 @@
 Models are chosen by spec strings ``"<provider>:<name>"`` taken from the environment:
 
 - ``HH_CHAT_MODEL``  default ``ollama:qwen2.5:7b`` (``ollama:qwen3:8b`` for comparison);
-  ``groq:<model>`` (e.g. ``groq:qwen/qwen3-32b``) uses Groq's hosted API — synthetic data only
-- ``HH_EMBED_MODEL`` default ``ollama:nomic-embed-text``; ``hash`` = offline deterministic
+  hosted APIs for synthetic data only: ``gemini:<model>`` (e.g. ``gemini:gemini-2.5-flash``,
+  Google AI Studio) or ``groq:<model>`` (e.g. ``groq:qwen/qwen3-32b``)
+- ``HH_EMBED_MODEL`` default ``ollama:nomic-embed-text``; ``hash`` = offline deterministic;
+  ``gemini:gemini-embedding-001`` hosted
 
-Groq settings (environment or a ``.env`` file in the working directory, never committed):
+Hosted settings (environment or a ``.env`` file in the working directory, never committed):
 
-- ``GROQ_API_KEY`` required for ``groq:`` models
-- ``HH_REQUESTS_PER_MINUTE`` default 20; one limiter is shared by every Groq model in the
-  process, so the router and the specialists together stay under the free-tier limit
+- ``GEMINI_API_KEY`` (or ``GOOGLE_API_KEY``) for ``gemini:``; ``GROQ_API_KEY`` for ``groq:``
+- ``HH_REQUESTS_PER_MINUTE`` default 10; one limiter per provider is shared by every model
+  in the process, so the router and the specialists together stay under the free-tier limit
 - ``HH_LLM_CACHE`` default ``.cache/llm.sqlite``; ``off`` disables. Answers are cached by
   prompt and model settings, so re-running an eval makes no new calls (delete to re-sample)
 
-Constructing an Ollama or Groq client does not contact the server, so this module imports
+Constructing an Ollama, Gemini or Groq client does not contact the server, so this module imports
 and tests without either. Unit tests inject LangChain fake chat models instead.
 """
 
@@ -41,11 +43,12 @@ ENV_EMBED_MODEL = "HH_EMBED_MODEL"
 DEFAULT_CHAT_MODEL = "ollama:qwen2.5:7b"
 DEFAULT_EMBED_MODEL = "ollama:nomic-embed-text"
 ENV_GROQ_KEY = "GROQ_API_KEY"
+ENV_GEMINI_KEYS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 ENV_RPM = "HH_REQUESTS_PER_MINUTE"
 ENV_CACHE = "HH_LLM_CACHE"
-DEFAULT_RPM = 20
+DEFAULT_RPM = 10
 DEFAULT_CACHE = ".cache/llm.sqlite"
-GROQ_MAX_RETRIES = 6  # 429s are retried with the server's retry-after delay
+HOSTED_MAX_RETRIES = 6  # 429s are retried with backoff
 
 
 @dataclass(frozen=True)
@@ -88,11 +91,22 @@ def get_chat_model(spec: str | None = None, *, temperature: float = 0.0) -> Base
             model=s.name,
             temperature=temperature,
             api_key=key,
-            max_retries=GROQ_MAX_RETRIES,
+            max_retries=HOSTED_MAX_RETRIES,
             rate_limiter=_shared_limiter("groq"),
             cache=_cache(),
             # Qwen3 otherwise prefixes answers with <think>…</think>, which breaks JSON parsing
             reasoning_format="hidden" if "qwen3" in s.name.lower() else None,
+        )
+    if s.provider == "gemini" and s.name:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(
+            model=s.name,
+            temperature=temperature,
+            google_api_key=_gemini_key(s),
+            max_retries=HOSTED_MAX_RETRIES,
+            rate_limiter=_shared_limiter("gemini"),
+            cache=_cache(),
         )
     raise ValueError(f"unsupported chat model {s}")
 
@@ -102,6 +116,13 @@ def setting(name: str, default: str | None = None) -> str | None:
     if name in os.environ:
         return os.environ[name]
     return dotenv_values(".env").get(name) if Path(".env").is_file() else default
+
+
+def _gemini_key(s: ModelSpec) -> str:
+    key = next((k for k in map(setting, ENV_GEMINI_KEYS) if k), None)
+    if not key:
+        raise ValueError(f"{s} needs {ENV_GEMINI_KEYS[0]} in the environment or .env")
+    return key
 
 
 _LIMITERS: dict[str, InMemoryRateLimiter] = {}
@@ -129,6 +150,10 @@ def get_embeddings(spec: str | None = None) -> Embeddings:
         return OllamaEmbeddings(model=s.name)
     if s.provider == "hash":
         return HashEmbeddings()
+    if s.provider == "gemini" and s.name:
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        return GoogleGenerativeAIEmbeddings(model=s.name, google_api_key=_gemini_key(s))
     raise ValueError(f"unsupported embedding model {s}")
 
 

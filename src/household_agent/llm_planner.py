@@ -131,7 +131,7 @@ class LLMThoughtGenerator:
                **_context(inputs, node)}
         reply = self.model.invoke([SystemMessage(GENERATOR_SYSTEM), HumanMessage(json.dumps(ask))])
         try:
-            raw = _ThoughtsReply.model_validate_json(_clean(str(reply.content))).thoughts
+            raw = _ThoughtsReply.model_validate_json(_clean(str(reply.text))).thoughts
         except ValidationError as e:
             return [self._fallback(node, tier, p, f"unparseable reply: {e.errors()[0]['msg']}") for p in PERSONAS]
 
@@ -169,7 +169,7 @@ class LLMCritic:
                                         "expected_net_yield": str(node.score.expected_net_yield)}}
         reply = self.model.invoke([SystemMessage(CRITIC_SYSTEM), HumanMessage(json.dumps(ask))])
         try:
-            parsed = _CriticReply.model_validate_json(_clean(str(reply.content)))
+            parsed = _CriticReply.model_validate_json(_clean(str(reply.text)))
             if not parsed.score.is_finite():
                 raise ValueError("score is not finite")
         except (ValidationError, ValueError) as e:
