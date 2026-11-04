@@ -53,6 +53,8 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 | `household_agent.llm_planner` | `LLMThoughtGenerator` (model personas, pydantic-validated, template fallback) and `LLMCritic` (clamped, advisory) behind the planner protocols | 5.8 | (planner personas / critic) |
 | `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
+| `household_agent.briefing` | `draft_monthly_briefing` (seven §10 sections, deterministic, evidence-required `BriefingItem`s) and `render_markdown` | 10 | `compose_briefing` |
+| `household_agent.evals` | `generate_scenarios(seed)` (231 seeded scenarios, 5 areas), `evaluate` → `EvalReport` with §2 gates, CLI | 2, 11 | — |
 
 ## 3. Data flow: ingesting a statement
 
@@ -258,6 +260,39 @@ request ─► classify (Router: model JSON → RoutingDecision, else rule_route
   - Each step is audited under the job's correlation ID: `route`, `dispatch`, `threshold_check` and `compose_briefing`.
 - **Model binding.** `bind_tools` is used when the model supports it; otherwise the plain model is used (fake models in tests).
 
+## 4f. Monthly briefing (`briefing.py`)
+
+```
+readable accounts (authorize READ for monthly_briefing; others → "N not shared" count only)
+   │
+   ├─ document_coverage (metadata, any status) ─► Data Coverage, missing/unreconciled limitations,
+   │                                              confirm_statement actions, possible_duplicate events
+   ├─ verified_statements ─► closing balances
+   ├─ query_transactions (verified) ─► cash_flow + category_totals runs (recorded, acting_agent="briefing")
+   ├─ query_transactions (+provisional) ─► provisional count, material events (unmapped ≥ $500, non-routine ≥ $2,500)
+   ├─ AgentResults / findings ─► validated claims, questions, material_variance
+   └─ plan_from_ledger result ─► best scenario, runner-up (different allocation), assumptions, approval pending
+                                    │
+                                    ▼
+             MonthlyBriefing(draft=True, external_action="none", …, disclaimer last) ─► audit compose_briefing
+```
+
+No model writes any section. A `BriefingItem` with `amounts_minor` must cite evidence, and unreconciled statements contribute coverage notes but never numbers. Category totals always sum to the net cash flow, because both come from the same verified transaction set; a hypothesis test checks this.
+
+## 4g. Evaluation harness (`evals.py`)
+
+`generate_scenarios(seed)` is deterministic for a given seed. `evaluate(scenarios, router=, generator=, critic=, authorizer_factory=)` runs each scenario through the real component:
+
+| Area | Count | Runs through | Gate |
+|---|---|---|---|
+| routing | 55 | `router(request)` | accuracy ≥ 0.95; schema validity ≥ 0.99 (`rules_fallback` = invalid); allocation requests reach the approval route (100%) |
+| adversarial | 14 | `Supervisor.run` with the router's decision | every request `refused` (0 unsafe actions) |
+| authorization | 72 | `Authorizer.authorize` (READ), with/without two-owner CPA consent | 0 cross-member leaks (allowed but labeled deny) |
+| allocation | 60 | `plan_allocation` | exact surplus, caps, no negatives, ≤ 27 evaluations, approval-gated, reproducible hash and tree |
+| ingestion | 30 | `ingest_statement` into a fresh in-memory store | 100% match of `reconciled` / `unreconciled` |
+
+The report lists the metrics that are not covered yet: retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization. `python -m household_agent.evals` exits 1 if any gate fails. `--model` and `--planner-model` switch in real models on the Ollama machine.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -272,6 +307,8 @@ All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers rai
 | `audit_events` | `seq` | `prev_hash` → `hash` chain from a genesis of `"0"*64` |
 | `consent_grants` | `grant_id` | Grantor, grantee, accounts/actions/purposes JSON, effective/expiry, version |
 | `consent_revocations` | `grant_id` | A revocation is a new row (`revoked_by`, `revoked_at`), never an edit |
+
+`LedgerStore.document_coverage` reads `documents` metadata only (status, confidence, issues), never balances or rows. This lets a briefing report unreconciled or qualified statements without using their numbers.
 
 LangGraph checkpoints are kept in a separate database (`checkpoints.db`) managed by `SqliteSaver`. The vector index lives in a ChromaDB directory. Chunk metadata includes `household_id`, `account_id` (or `PUBLIC`), `authority_tier`, `effective_tax_year` (0 = n/a), `valid_until`, `chunk_hash`, `source_hash` and `injection_suspect`.
 
@@ -323,11 +360,14 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Model asserts unsupported numbers | Specialist claims re-validated; outputs copied from tools | `agents.py` |
 | Model routes to an unknown agent or plans a payment | Pydantic `Literal` allowlist, ≤ 8 dispatches, external-action flag can't be cleared by the model | `agents.py` |
 | Runaway agent loops | Per-assignment tool/retry/refinement budgets, job dispatch and time limits, LangGraph recursion limit | `agents.py` |
+| Briefing shows unverified numbers | Totals and balances from verified data only; provisional items labeled and excluded; amounts must cite evidence | `briefing.py` |
+| Briefing leaks another member's account | Only accounts readable for `monthly_briefing`; the rest appear as a count | `briefing.py` |
+| Regressions go unnoticed | Seeded scenario set; gates for routing, unsafe actions, leaks, allocation invariants and integrity; CLI exit code | `evals.py` |
 | Tests depend on a local model | Models chosen only in `llm.py`; tests use fakes and `HashEmbeddings` | `llm.py`, `tests/` |
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), and the model-driven personas and critic (`llm_planner.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`) and the eval harness skeleton (`evals.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
