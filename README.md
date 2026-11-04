@@ -44,6 +44,13 @@ What's in Phase 2 so far:
      - A tax claim needs a verified Tier-1 source for the same tax year. Otherwise it gets the standard "cannot verify the rule for this tax year" sentence.
      - Every number in a claim must appear in its cited evidence.
    - Text that looks like an instruction (e.g. "ignore previous instructions") is flagged and audited as a data-quality finding. It is never followed.
+7. **Agents** (`agents.py`). A LangGraph Supervisor routes each request, dispatches the Ledger Analyst and the Policy & Compliance agent, checks thresholds and composes the briefing.
+   - **Handoffs.** These are typed (`TaskAssignment` → `AgentResult`). Status is `completed`, `needs_review`, `failed` or `budget_exhausted`.
+   - **Specialists.** Each is a bounded ReAct subgraph: 6 tool calls, 2 retries per tool, and 2 query refinements for Policy & Compliance. A specialist can only call its own allowlisted tools.
+   - **Numbers.** Outputs and evidence IDs are copied from tool observations. Every model-written claim goes back through `validate_claims`, so an invented amount is dropped and the result is flagged `needs_review`.
+   - **Supervisor budgets.** At most 8 dispatches and 5 minutes per job. Requests to pay or transfer are refused. Allocation requests start the approval graph and pause.
+   - **Router.** A model router with a keyword fallback. The purpose comes from the intent and the identity from the host, never from the model.
+   - **Briefing.** Deterministic. It contains only validated claims, open questions and threshold findings (e.g. a property-tax variance over 10%).
 
 ## Quick start
 
@@ -96,6 +103,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   approval.py              LangGraph plan → interrupt() approval graph with checkpointing
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
+  agents.py                Supervisor + Ledger Analyst + Policy & Compliance (LangGraph), typed handoffs, budgets
   retrieval.py             ChromaDB verified retrieval (authorize-first filters, MMR, verification) + validate_claims
   synthetic.py             Demo household, accounts, rules, statements
   demo.py                  `python -m household_agent.demo`
@@ -128,7 +136,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_mcp_server.py` | 8 | Tool list has no identity arguments, query + calculate over MCP, denial as data, `langchain-mcp-adapters` tools, server refuses to start without an identity (3 cases), real stdio subprocess end to end |
 | `test_retrieval.py` | 22 | Private doc never a candidate for another member, consent grant/revocation take effect immediately (purpose-scoped), delegate public-only, dependent nothing, household isolation, missing purpose/query rejected, forged indexing denied, expired source not citable, tax-year pre-filter, Tier-1-same-year tax rule, invented numbers removed, calculated/unknown-evidence claims, injection flagged and audited, tampered chunk detected, statement chunking, period filter, heading split, chunk-window and MMR properties (hypothesis) |
 
-Total: **159 passing**.
+| `test_agents.py` | 27 | §9 property-tax trace end to end, outputs from tools not model text, invented numbers and unknown evidence removed, tool budget, retry limit, tool allowlist, cross-member denial, unparseable answer, query-refinement limit, tax claim → "cannot verify" question, private doc not citable, external action refused, model can't clear the external-action flag, invalid routing falls back (3 cases), purpose from intent, dispatch budget, job time limit, crashing/missing specialist, briefing only from claims, allocation pauses for approval, out of scope, router property (hypothesis) |
+
+Total: **186 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 

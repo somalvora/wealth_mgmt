@@ -300,7 +300,12 @@ class Claim:
 
 
 def _numbers(text: str) -> set[str]:
-    return {n.replace(",", "").rstrip(".") for n in _NUMBER.findall(text)}
+    """Numbers in canonical form: no separators, no trailing decimal zeros ("3,200.00" → "3200")."""
+    out = set()
+    for n in _NUMBER.findall(text):
+        n = n.replace(",", "")
+        out.add(n.rstrip("0").rstrip(".") if "." in n else n)
+    return out
 
 
 def validate_claims(
