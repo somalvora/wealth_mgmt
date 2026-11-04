@@ -71,6 +71,26 @@ data/synthetic/            Generated sample statements (synthetic only)
 tests/                     pytest + hypothesis suites
 ```
 
+## Testing
+
+Every feature ships with tests in the same change. A step isn't done until `uv run pytest` passes. Each new module gets:
+
+- **Happy-path tests** using hand-computed expected values.
+- **Negative-path tests** covering denials, rejected input, blocked data and pruned branches. The design's guardrails are only real if a test shows them refusing.
+- **Property tests** (`hypothesis`) for any money math, e.g. totals sum exactly and scores stay in [0, 1].
+- **An end-to-end check** through the demo flow when the feature is visible to users.
+
+| Test file | Tests | Covers |
+|---|---|---|
+| `test_finance.py` | 15 (+ parametrized cases) | Money parsing and formatting, cash flow, category totals, variance, drift, amortization; hypothesis properties |
+| `test_authz.py` | 11 | Owner access, cross-member denial, joint all-owner consent, delegate expiry and revocation, dependents |
+| `test_audit.py` | 4 | Chain verification, UPDATE/DELETE blocked, tamper detection |
+| `test_ingest_reconcile.py` | 11 | Parser provenance and errors; reconciled, qualified and unreconciled outcomes; duplicates, reversals, confidence |
+| `test_ledger_and_calcs.py` | 10 | Upload denial audited, re-import blocked, provisional and unreconciled filtering, versioned corrections, reproducible calculations |
+| `test_planning.py` | 17 | Allocation expansion and constraints, 15-node beam search, rollout scoring, liquidity tie-break, hard pruning, advisory critic |
+
+Total: **76 passing**.
+
 ## Statement format (`hh_statement_csv_v1`)
 
 ```
