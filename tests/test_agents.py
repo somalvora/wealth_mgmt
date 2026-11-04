@@ -15,6 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from household_agent.agents import (
     MAX_DISPATCHES,
     AgentResult,
+    Budget,
     LedgerAnalyst,
     PolicyCompliance,
     Router,
@@ -165,6 +166,14 @@ def test_ledger_tool_budget(seeded_store, categorizer):
     r = _ledger(seeded_store, categorizer, [call("list_accounts")] * 7)(assignment())
     assert r.status == "budget_exhausted" and r.needs_review
     assert any("budget_exhausted" in e for e in r.errors)
+
+
+def test_ledger_model_is_told_its_tool_budget(seeded_store, categorizer):
+    seen = []
+    steps = [lambda msgs: seen.append(msgs) or final()]
+    _ledger(seeded_store, categorizer, steps)(assignment(budget=Budget(max_tool_calls=4)))
+    system, task = seen[0][0].content, json.loads(seen[0][1].content)
+    assert task["tool_budget"] == 4 and "tool_budget" in system and "merchant" in system
 
 
 def test_ledger_retry_limit_per_tool(seeded_store, categorizer):
