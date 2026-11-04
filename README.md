@@ -83,6 +83,14 @@ What's in Phase 2 so far:
     - **Ingestion (30).** Random statements, a third with a corrupted closing balance. Each must end `reconciled` or `unreconciled` as labeled. Gate: 100% statement integrity.
     - **Not covered yet.** Retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization are listed in the report.
     - **Keyword baseline.** All gates pass. Routing scores 98.2%: "Did we pay more for utilities…?" is wrongly flagged as a payment request. That is safe, but it is a miss.
+12. **Vertical-slice exit run** (`vertical_slice.py`, design §12 "Vertical-Slice Exit Criteria"). One command runs a whole synthetic job under one correlation ID and turns each exit criterion into a PASS/FAIL check with evidence IDs:
+    - **Three agents, one trace.** The Supervisor routes the §9 property-tax question to the Ledger Analyst (query → `variance_between_transactions`) and Policy & Compliance (verified retrieval). The calculation's input transactions lead back to their statements' `source_hash` and to the audit events of the job.
+    - **Guardrails.** Jordan is denied Alex's private checking. The CPA reads the rental account with both owners' consent, and is denied once Jordan revokes. The corrupt September statement can't be forced into a calculation. An expired county bill and a 2025-only IRS source for a 2026 claim both become "cannot verify" questions.
+    - **Planning.** The plan is derived from the ledger, and the same input hash gives the same 15-node tree. An over-cap persona is hard-pruned, and a disagreeing critic sends the plan to `needs_review`.
+    - **Approval across a restart.** The allocation request pauses. The ledger and checkpoint databases are closed and reopened as a new process would. Sam's approval is denied and Jordan's is accepted, and the audit log shows the planning step ran exactly once.
+    - **Draft briefing.** The October briefing includes the agents' claims, the variance finding, the plan and the pending approval, and leaves out Jordan's private card.
+    - **No external actions.** A transfer request is refused, and no tool can move money. The audit chain verifies.
+    - By default the agents use `PlaybackChatModel`, which replays scripted tool calls offline. `--model ollama:qwen2.5:7b` uses a real model for the router and both specialists. The checks test the system's guarantees, not the model's wording.
 
 ## Quick start
 
@@ -97,6 +105,8 @@ export HH_CHAT_MODEL=ollama:qwen3:8b       # optional; default is ollama:qwen2.5
 uv sync                                    # create .venv and install deps
 uv run pytest                              # run all tests
 uv run python -m household_agent.demo      # end-to-end demo on synthetic data
+uv run python -m household_agent.vertical_slice --workdir slice --out slice.json   # §12 exit criteria, offline (exit 1 if a check fails)
+uv run python -m household_agent.vertical_slice --model ollama:qwen2.5:7b --embed-model ollama:nomic-embed-text   # on the Ollama machine
 uv run python scripts/generate_synthetic_data.py   # (re)write data/synthetic/*.csv
 uv run python -m household_agent.evals --out eval.json   # eval gates, keyword-router baseline (exit 1 if a gate fails)
 uv run python -m household_agent.evals --model ollama:qwen3:8b --planner-model ollama:qwen3:8b   # on the Ollama machine
@@ -104,7 +114,7 @@ HH_LEDGER_DB=ledger.db HH_ACTOR=alex HH_PURPOSE=budgeting \
   uv run python -m household_agent.mcp_server       # MCP server on stdio (for an MCP client)
 ```
 
-The demo walks through five steps:
+The demo walks through six steps (the full §12 run with all three agents is `vertical_slice`):
 
 1. **Ingests five synthetic statements.** Three reconcile cleanly. Jordan's card statement is `qualified` because it contains two identical Safeway charges that need a human to confirm. The September file is `unreconciled` because its balances don't add up.
 2. **Compares the October property tax year over year.** It went from $2,750.00 to $3,200.00, a rise of **$450.00 (16.36%)**. The result comes with a calculation `run_id` and an input hash.
@@ -139,6 +149,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   briefing.py              Draft-only seven-section monthly briefing (deterministic, evidence-cited) + Markdown
   evals.py                 Seeded ≥200-scenario eval harness and §2 gates; `python -m household_agent.evals`
+  vertical_slice.py        §12 exit-criteria run (3 agents, guardrails, restart resume); `python -m household_agent.vertical_slice`
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
   mcp_server.py            household-finance-tools stdio MCP server over ToolSession
   agents.py                Supervisor + Ledger Analyst + Policy & Compliance (LangGraph), typed handoffs, budgets
@@ -179,8 +190,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_llm_planner.py` | 17 | Model thoughts drive the same 15-node search in 5 calls, model fraction and rationale used, `<think>` and code fences stripped, unparseable reply falls back to templates, amount fields rejected, currency in rationale rejected, fraction > 1 rejected, missing/duplicate personas, out-of-tier bucket and wrong tier hard-pruned (not repaired), agreeing critic, disagreeing critic → `needs_review` with nothing pruned, unusable/NaN/extra-field critic replies have no opinion, approving makes no model calls, any reply yields one thought per persona and critic score clamped to [0, 1] (hypothesis) |
 | `test_briefing.py` | 16 | Alex's October cash flow, category totals and closing balances (hand-computed), calc runs recorded and briefing audited, routine items skipped and property tax listed, $500 unmapped threshold, plan + runner-up + pending approval under Actions, Supervisor claims/questions sorted into sections, Markdown has every section and the disclaimer, Jordan never sees Alex's private account, qualified card provisional with duplicate and confirmation request, corrupt statement contributes no numbers, missing statements reported, dependent and tax-only CPA get no ledger data (2 cases), schema guards (amounts need evidence, draft/disclaimer required), category totals sum to net cash flow (hypothesis) |
 | `test_evals.py` | 13 | ≥200 deterministic scenarios across 5 areas, oracle router passes every gate, keyword baseline safe and its one false positive reported, CLI writes the JSON report, model persona generator keeps allocation invariants, router that never flags payments fails `unsafe_actions`, model "no external action" overridden, unparseable model router fails schema validity, misrouted allocation fails approval gating, allow-all authorizer reported as leaks, wrong label caught, empty set, any seed keeps the safety and integrity gates (hypothesis) |
+| `test_vertical_slice.py` | 12 | All 14 §12 checks pass offline, calc run → transactions → source hashes → correlation ID, artifacts kept in the workdir (briefing has the variance and pending approval, no private card), resume doesn't re-run planning, CLI report and exit code, model-factory path (router + specialists), a ledger model that skips its tools fails the trace while every guardrail check still passes, a router that hides a transfer is still refused, a misrouted allocation request fails the approval check without crashing, empty/failed reports not passed, playback past its script, any correlation ID tags every job event (hypothesis) |
 
-Total: **249 passing**.
+Total: **261 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -211,14 +223,14 @@ These parts of the design are not implemented yet:
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
 - **Statement formats.** There is no PDF/OCR ingestion; only the CSV format above is supported.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
-- **Agents and orchestration.** The LangGraph supervisor and specialist agents, are next in Phase 2. The approval graph, MCP tools and retrieval are not yet wired to the supervisor. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
+- **Agents and orchestration.** The Supervisor and both specialists run end to end in `vertical_slice`, but only with offline playback models so far; a real-model run on the Ollama machine is still needed. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are derived from the ledger (`plan_inputs.py`), but the demo's step 5 still uses the fixed synthetic inputs. Contribution room and return assumptions are still passed in rather than retrieved.
   - The model persona generator and critic (`llm_planner.py`) are tested only with fake models so far. Their prompts haven't been tuned against `qwen2.5:7b` / `qwen3:8b`, and the demo still uses the template generator. Real-model runs happen on the Ollama machine.
 
 - **Briefing and evals.**
-  - The briefing is not yet produced by the demo or the Supervisor graph.
+  - The briefing is produced by `vertical_slice` from the Supervisor's results, but the Supervisor graph's own `compose_briefing` step still returns only the claim list.
   - No household net-worth total is shown, because property, loans and investments aren't in the ledger.
   - The eval set is template-generated, not a human-labeled held-out set.
   - Retrieval, citation, calculation-match, anomaly and memorization metrics are not scored yet.

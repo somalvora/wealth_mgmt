@@ -55,6 +55,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
 | `household_agent.briefing` | `draft_monthly_briefing` (seven §10 sections, deterministic, evidence-required `BriefingItem`s) and `render_markdown` | 10 | `compose_briefing` |
 | `household_agent.evals` | `generate_scenarios(seed)` (231 seeded scenarios, 5 areas), `evaluate` → `EvalReport` with §2 gates, CLI | 2, 11 | — |
+| `household_agent.vertical_slice` | `run_vertical_slice(workdir, models=, embeddings=)` → `SliceReport` of 14 `Check`s; `PlaybackChatModel` offline stand-in; CLI | 12 | — |
 
 ## 3. Data flow: ingesting a statement
 
@@ -293,6 +294,29 @@ No model writes any section. A `BriefingItem` with `amounts_minor` must cite evi
 
 The report lists the metrics that are not covered yet: retrieval recall@5, citation precision, calculation match, anomaly recall and privacy memorization. `python -m household_agent.evals` exits 1 if any gate fails. `--model` and `--planner-model` switch in real models on the Ollama machine.
 
+## 4h. Vertical-slice exit run (`vertical_slice.py`)
+
+`run_vertical_slice` uses file-backed stores in `workdir` (`ledger.db`, `checkpoints.db`, `chroma/`) so the restart step is real. Each check maps to a §12 exit criterion:
+
+| Check | What it does | Passes when |
+|---|---|---|
+| `ingest_and_reconcile` | Each owner uploads their statements | 3 reconciled, Jordan's card qualified, September unreconciled |
+| `three_agent_trace` | `Supervisor.run` on the §9 question | Both specialists ran, a calc run exists, audit shows route → 2 dispatches → compose |
+| `provenance_chain` | Follows `calculation_runs.input_ids_json` → `transactions.source_document_id` → `documents.source_hash` | Every link exists, and `ingest_document` and `calculate` events share the job's correlation ID |
+| `authorization_denial` | Jordan reads Alex's checking; Sam indexes a document | Both refused, the deny is audited |
+| `consent_revocation_denial` | Both owners grant the CPA rental access via `ConsentStore`, then Jordan revokes | The read succeeds before and is refused after |
+| `unreconciled_block` | Forces September's raw rows into `cash_flow` | `IneligibleInputError`; the September briefing has no figures |
+| `stale_source_escalation` | `retrieve_verified` + `validate_claims` | Expired bill and wrong-year IRS source → `rephrase_as_question` / `CANNOT_VERIFY` |
+| `planning_reproducible` | `plan_from_ledger`, re-plan, re-derive | Same input hash and tree, 15 evaluations, provisional (Jordan's card excluded) |
+| `cap_breach_hard_pruned` | `OverCapPersona` puts everything in the IRA | Branches `hard_pruned` with `statutory_cap_exceeded`; a compliant best plan remains |
+| `critic_discrepancy_review` | `CashLovingCritic` disagrees | `needs_review` with discrepancy node IDs; no branch removed |
+| `draft_briefing` | `draft_monthly_briefing` with results, findings, plan and thread ID | Draft only, disclaimer last, amounts cite evidence, no private card |
+| `interrupt_and_resume` | Supervisor allocation request → close and reopen both databases → Sam, then Jordan | Paused at `approval`; thread audit is `plan_allocation`, `approve`(deny), `approve`(allow) |
+| `no_external_actions` | Transfer request; inspect the tool names | `refused`; no tool name matches pay/transfer/wire |
+| `audit_trail` | `AuditLog.verify()` | Chain intact and every stage appears under the job's correlation ID |
+
+`models(role)` selects the chat model for `router`, `ledger_analyst` and `policy_compliance`. If no factory is given, the specialists use `PlaybackChatModel` scripts. These read real IDs from earlier tool results, so the scripts never hard-code an ID, and the router uses keyword rules. A model that misbehaves makes its own checks fail, while the guardrail checks keep passing; tests cover both cases.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
@@ -367,7 +391,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`) and the eval harness skeleton (`evals.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`), the eval harness skeleton (`evals.py`) and the §12 vertical-slice exit run (`vertical_slice.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.

@@ -77,6 +77,7 @@ def main() -> None:
     print(f"   status={plan.status} (interrupt for household approval; no money moves)")
 
     print(f"\n6. Audit chain verified: {store.audit.verify()} events, correlation_id={corr}")
+    print("\nFor the full §12 run with all three agents: python -m household_agent.vertical_slice")
 
 
 if __name__ == "__main__":
