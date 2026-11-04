@@ -2,26 +2,50 @@
 
 Models are chosen by spec strings ``"<provider>:<name>"`` taken from the environment:
 
-- ``HH_CHAT_MODEL``  default ``ollama:qwen2.5:7b`` (``ollama:qwen3:8b`` for comparison)
+- ``HH_CHAT_MODEL``  default ``ollama:qwen2.5:7b`` (``ollama:qwen3:8b`` for comparison);
+  ``groq:<model>`` (e.g. ``groq:qwen/qwen3-32b``) uses Groq's hosted API — synthetic data only
 - ``HH_EMBED_MODEL`` default ``ollama:nomic-embed-text``; ``hash`` = offline deterministic
 
-Constructing an Ollama client does not contact the server, so this module imports and
-tests without Ollama installed. Unit tests inject LangChain fake chat models instead.
+Groq settings (environment or a ``.env`` file in the working directory, never committed):
+
+- ``GROQ_API_KEY`` required for ``groq:`` models
+- ``HH_REQUESTS_PER_MINUTE`` default 20; one limiter is shared by every Groq model in the
+  process, so the router and the specialists together stay under the free-tier limit
+- ``HH_LLM_CACHE`` default ``.cache/llm.sqlite``; ``off`` disables. Answers are cached by
+  prompt and model settings, so re-running an eval makes no new calls (delete to re-sample)
+
+Constructing an Ollama or Groq client does not contact the server, so this module imports
+and tests without either. Unit tests inject LangChain fake chat models instead.
 """
 
 import hashlib
+import json
 import math
 import os
 import re
+import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
+from dotenv import dotenv_values
+from langchain_core.caches import BaseCache
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import message_to_dict, messages_from_dict
+from langchain_core.outputs import ChatGeneration, Generation
+from langchain_core.rate_limiters import InMemoryRateLimiter
 
 ENV_CHAT_MODEL = "HH_CHAT_MODEL"
 ENV_EMBED_MODEL = "HH_EMBED_MODEL"
 DEFAULT_CHAT_MODEL = "ollama:qwen2.5:7b"
 DEFAULT_EMBED_MODEL = "ollama:nomic-embed-text"
+ENV_GROQ_KEY = "GROQ_API_KEY"
+ENV_RPM = "HH_REQUESTS_PER_MINUTE"
+ENV_CACHE = "HH_LLM_CACHE"
+DEFAULT_RPM = 20
+DEFAULT_CACHE = ".cache/llm.sqlite"
+GROQ_MAX_RETRIES = 6  # 429s are retried with the server's retry-after delay
 
 
 @dataclass(frozen=True)
@@ -54,7 +78,47 @@ def get_chat_model(spec: str | None = None, *, temperature: float = 0.0) -> Base
         from langchain_ollama import ChatOllama
 
         return ChatOllama(model=s.name, temperature=temperature)
+    if s.provider == "groq" and s.name:
+        from langchain_groq import ChatGroq
+
+        key = setting(ENV_GROQ_KEY)
+        if not key:
+            raise ValueError(f"{s} needs {ENV_GROQ_KEY} in the environment or .env")
+        return ChatGroq(
+            model=s.name,
+            temperature=temperature,
+            api_key=key,
+            max_retries=GROQ_MAX_RETRIES,
+            rate_limiter=_shared_limiter("groq"),
+            cache=_cache(),
+            # Qwen3 otherwise prefixes answers with <think>…</think>, which breaks JSON parsing
+            reasoning_format="hidden" if "qwen3" in s.name.lower() else None,
+        )
     raise ValueError(f"unsupported chat model {s}")
+
+
+def setting(name: str, default: str | None = None) -> str | None:
+    """Environment first, then ``.env`` in the working directory; ``.env`` never mutates os.environ."""
+    if name in os.environ:
+        return os.environ[name]
+    return dotenv_values(".env").get(name) if Path(".env").is_file() else default
+
+
+_LIMITERS: dict[str, InMemoryRateLimiter] = {}
+
+
+def _shared_limiter(provider: str) -> InMemoryRateLimiter:
+    if provider not in _LIMITERS:
+        rpm = float(setting(ENV_RPM) or DEFAULT_RPM)
+        if rpm <= 0:
+            raise ValueError(f"{ENV_RPM} must be positive, got {rpm}")
+        _LIMITERS[provider] = InMemoryRateLimiter(requests_per_second=rpm / 60, check_every_n_seconds=0.1)
+    return _LIMITERS[provider]
+
+
+def _cache() -> BaseCache | None:
+    path = setting(ENV_CACHE) or DEFAULT_CACHE
+    return None if path.lower() == "off" else SQLiteChatCache(path)
 
 
 def get_embeddings(spec: str | None = None) -> Embeddings:
@@ -90,3 +154,45 @@ class HashEmbeddings(Embeddings):
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed(text)
+
+
+class SQLiteChatCache(BaseCache):
+    """Disk cache of chat answers keyed by (prompt, model settings incl. bound tools).
+
+    Messages are stored as plain dicts (``message_to_dict``), not pickles or LangChain's
+    generic object loader, so reading the cache can only produce message objects.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._run("CREATE TABLE IF NOT EXISTS answers (key TEXT PRIMARY KEY, body TEXT NOT NULL)")
+
+    def _run(self, sql: str, args: tuple = ()) -> list[tuple]:
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                return conn.execute(sql, args).fetchall()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _key(prompt: str, llm_string: str) -> str:
+        return hashlib.sha256(json.dumps([prompt, llm_string]).encode()).hexdigest()
+
+    def lookup(self, prompt: str, llm_string: str) -> list[Generation] | None:
+        rows = self._run("SELECT body FROM answers WHERE key = ?", (self._key(prompt, llm_string),))
+        if not rows:
+            return None
+        stored = json.loads(rows[0][0])
+        messages = messages_from_dict([g["message"] for g in stored])
+        return [ChatGeneration(message=m, generation_info=g["info"]) for m, g in zip(messages, stored, strict=True)]
+
+    def update(self, prompt: str, llm_string: str, return_val: Sequence[Generation]) -> None:
+        if not all(isinstance(g, ChatGeneration) for g in return_val):
+            return  # only chat answers are cached
+        body = json.dumps([{"message": message_to_dict(g.message), "info": g.generation_info} for g in return_val])
+        self._run("INSERT OR REPLACE INTO answers (key, body) VALUES (?, ?)", (self._key(prompt, llm_string), body))
+
+    def clear(self, **kwargs) -> None:
+        self._run("DELETE FROM answers")

@@ -45,7 +45,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_finance.risk` | `cluster_risk`: new-merchant small-charge clusters, one-day bursts, card-testing probes | 5.4, 5.5 | `run_calculation` (`cluster_risk`) |
 | `household_finance.allocation` | Strategy → cents expansion, hard constraints, composite score, rollout | 3.4, 5.8 | `evaluate_allocation_candidates` |
 | `household_agent.planning` | Tree-of-Thought beam search, `ThoughtGenerator` and `Critic` protocols, template personas | 5.8 | (Supervisor planning subgraph) |
-| `household_agent.llm` | The only place models are named: `get_chat_model()` / `get_embeddings()` from `HH_CHAT_MODEL` / `HH_EMBED_MODEL`; offline `HashEmbeddings` | 3.5 | — |
+| `household_agent.llm` | The only place models are named: `get_chat_model()` / `get_embeddings()` from `HH_CHAT_MODEL` / `HH_EMBED_MODEL` (Ollama, or Groq for synthetic-data runs); one shared rate limiter per hosted provider, `SQLiteChatCache`, offline `HashEmbeddings` | 3.5 | — |
 | `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
 | `household_agent.tools` | `ToolSession`: identity/purpose bound by the host, call budget, structured errors, session-scoped transaction IDs | 3.2, 4.1 | all Ledger Analyst tools |
 | `household_agent.mcp_server` | `household-finance-tools` FastMCP stdio server over `ToolSession`; identity from env | 3.2, 4.2 | (MCP transport) |
@@ -302,7 +302,7 @@ Cluster alerts cite the `cluster_risk` run ID and every transaction in the patte
 | retrieval | 22 | `RetrievalService.retrieve_verified` over 13 sources (each indexed by its owner), then `validate_claims` | document recall@5 ≥ 0.90 over relevant docs the asker may see; leaks judged by an ownership oracle; citation precision ≥ 0.95 (claims tested with the right source, a wrong source and a changed digit) |
 | privacy | 8 | briefing, retrieval, `ToolSession` and a recorded `Supervisor` job per observer | 0 canary exposures for 6 non-owner cases; both owners see their canary on all 4 surfaces |
 
-Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded playback models) once per run and close them afterwards. Membership inference is the only design §2 metric still listed as not covered. `python -m household_agent.evals` exits 1 if any gate fails. `--model`, `--planner-model` and `--embed-model` switch in real models on the Ollama machine. Offline results: all 13 gates pass. The two misses are `route_054` (a keyword false positive) and `retr_005` (hash embeddings rank the water-heater invoice below 5).
+Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded playback models) once per run and close them afterwards. Membership inference is the only design §2 metric still listed as not covered. `python -m household_agent.evals` exits 1 if any gate fails. `--model`, `--planner-model` and `--embed-model` switch in real models: Ollama on the model machine, or `groq:…` chat models from any laptop (embeddings stay `hash`/Ollama). Offline results: all 13 gates pass. The two misses are `route_054` (a keyword false positive) and `retr_005` (hash embeddings rank the water-heater invoice below 5).
 
 ## 4h. Vertical-slice exit run (`vertical_slice.py`)
 
@@ -403,7 +403,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 
 ## 8. Phase 2 plan (design §4, §12 steps 6–10)
 
-Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`), the eval harness with all design §2 gates except membership inference (`evals.py`, `eval_quality.py`), cluster-risk rules (`household_finance.risk`) and the §12 vertical-slice exit run (`vertical_slice.py`). Real-model runs and evals happen on a separate machine with Ollama. Everything here must stay testable without it.
+Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), the durable approval interrupt (`approval.py`), the shared tool layer (`tools.py`), the stdio MCP server (`mcp_server.py`) verified retrieval (`retrieval.py`), the Supervisor with both specialists (`agents.py`), ledger-derived planner inputs with recorded plan runs (`plan_inputs.py`), the model-driven personas and critic (`llm_planner.py`), the draft monthly briefing (`briefing.py`), the eval harness with all design §2 gates except membership inference (`evals.py`, `eval_quality.py`), cluster-risk rules (`household_finance.risk`) and the §12 vertical-slice exit run (`vertical_slice.py`). Real-model runs use Groq's hosted API (synthetic data only) or a separate machine with Ollama. Everything here must stay testable without either.
 
 - **Agents.** A LangGraph supervisor graph with two specialists.
   - Ledger Analyst: `parse_statement`, `reconcile_statement`, `query_ledger`, `run_calculation`, `assess_risk`.
@@ -416,7 +416,7 @@ Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), 
 - **Durability.** A SQLite checkpointer, plus `interrupt()` for human approval.
 - **Retrieval.** A ChromaDB index of verified documents, using 500/100 chunking and `nomic-embed-text`. Every retrieval is filtered by the authorizer.
 - **MCP.** A `household-finance-tools` stdio MCP server exposes the Phase 1 functions, consumed through `langchain-mcp-adapters`.
-- **Models.** Local Ollama models: `qwen2.5:7b` as the baseline, with `qwen3:8b` for comparison.
+- **Models.** Local Ollama models: `qwen2.5:7b` as the baseline, with `qwen3:8b` for comparison. Hosted Groq models (`qwen/qwen3-32b`, `llama-3.1-8b-instant`) for evals on synthetic data when no local model is available.
 - **Planner (§5.8).**
   - Persona prompts emit `pydantic`-validated `AllocationStep`s, with a model critic. **Done** (`llm_planner.py`; one batched call per beam node). CrewAI is not used.
   - Evaluate each depth in one batched `evaluate_allocation_candidates` call.

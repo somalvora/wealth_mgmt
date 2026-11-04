@@ -403,7 +403,7 @@ def evaluate(
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m household_agent.evals", description=__doc__.splitlines()[0])
-    ap.add_argument("--model", help="chat model spec for the router, e.g. ollama:qwen3:8b (default: keyword router)")
+    ap.add_argument("--model", help="chat model spec for the router, e.g. ollama:qwen3:8b or groq:qwen/qwen3-32b (default: keyword router)")
     ap.add_argument("--planner-model", help="chat model spec for the persona generator and critic")
     ap.add_argument("--embed-model", help="embedding model spec for retrieval, e.g. ollama:nomic-embed-text "
                                           "(default: offline hash embeddings)")
