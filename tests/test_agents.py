@@ -1,22 +1,30 @@
 import json
+import sqlite3
 from datetime import timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import chromadb
 import pytest
 from chromadb.config import Settings
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from pydantic import ValidationError
 
 from household_agent.agents import (
     MAX_DISPATCHES,
     MAX_QUERY_REFINEMENTS,
+    LEDGER_PROMPT,
+    LEDGER_TOOLS,
     AgentResult,
     Budget,
+    DispatchItem,
     LedgerAnalyst,
     PolicyCompliance,
     Router,
@@ -24,12 +32,23 @@ from household_agent.agents import (
     Supervisor,
     TaskAssignment,
     rule_route,
+    variance_threshold,
 )
 from household_agent.approval import build_approval_graph
+from household_agent.audit import AuditLog
+from household_agent.authz import Authorizer
 from household_agent.llm import HashEmbeddings
 from household_agent.mcp_server import MEMBERS
 from household_agent.retrieval import CANNOT_VERIFY, RetrievalService
-from household_agent.synthetic import ALEX, DEMO_AS_OF, JORDAN, demo_planning_inputs, demo_policy_documents
+from household_agent.synthetic import (
+    ACCOUNTS,
+    ALEX,
+    DEMO_AS_OF,
+    JORDAN,
+    demo_planning_inputs,
+    demo_policy_documents,
+    demo_statements,
+)
 
 TAX = "San Mateo County Tax Collector"
 RENTAL = "acct_rental_checking"
@@ -132,11 +151,14 @@ def test_supervisor_runs_the_property_tax_trace(seeded_store, categorizer, retri
     ledger, policy = (AgentResult.model_validate(r) for r in out["results"])
     assert ledger.status == "completed" and ledger.outputs["dollar_variance_minor"] == 45000
     assert ledger.outputs["calc_run_id"] in ledger.evidence_ids
+    assert ledger.outputs["category"] == "property_tax" and ledger.outputs["account_ids"] == [RENTAL]
+    assert ledger.correlation_id == policy.correlation_id == "job_trace"
     assert policy.claims[0].text == "Monthly rent for Unit B is $3,400.00."
     assert policy.questions == [CANNOT_VERIFY]
     b = out["briefing"]
     assert [s["text"] for s in b["statements"]] == [ledger.claims[0].text, policy.claims[0].text]
     assert b["findings"][0]["type"] == "material_variance" and b["findings"][0]["pct_variance"] == "16.36"
+    assert b["findings"][0]["threshold_pct"] == "10" and b["review"] is None  # property-tax override
     assert b["external_action"].startswith("none")
     actions = [e["action"] for e in seeded_store.audit.events("job_trace") if e["acting_agent"] == "supervisor"]
     assert actions == ["route", "dispatch", "dispatch", "threshold_check", "compose_briefing"]
@@ -202,7 +224,7 @@ def test_ledger_retry_limit_per_tool(seeded_store, categorizer):
 
 
 def test_ledger_cannot_use_tools_outside_its_allowlist(seeded_store, categorizer):
-    steps = [call("ingest_statement", csv_text="x", source_name="x"), call("retrieve_verified", query="q"), final()]
+    steps = [call("assess_risk", fn="x"), call("retrieve_verified", query="q"), final()]
     r = _ledger(seeded_store, categorizer, steps)(assignment())
     assert sum("not allowed" in e for e in r.errors) == 2
 
@@ -270,7 +292,8 @@ def _stub(status="completed", **kw):
 
     def run(a: TaskAssignment) -> AgentResult:
         calls.append(a)
-        return AgentResult(task_id=a.task_id, agent=a.assigned_agent, status=status, **kw)
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent, status=status,
+                           **kw)
 
     run.calls = calls
     return run
@@ -329,7 +352,8 @@ def test_job_time_limit(seeded_store):
 
     def slow(a):
         now[0] += timedelta(seconds=301)
-        return AgentResult(task_id=a.task_id, agent=a.assigned_agent, status="completed")
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed")
 
     sup = Supervisor(ALEX, Router(), {"ledger_analyst": slow, "policy_compliance": slow}, seeded_store.audit,
                      clock=lambda: now[0])
@@ -373,3 +397,191 @@ def test_rule_router_always_produces_a_valid_bounded_plan(text):
     assert len(agents) == len(set(agents)) <= 2
     if d.intent == "allocation_planning":
         assert d.approval_required and not agents
+
+
+# --- handoff contract: correlation IDs and frozen payloads -------------------------------
+
+def test_handoff_payloads_are_frozen_and_carry_the_correlation_id(seeded_store, categorizer):
+    a = assignment()
+    r = _ledger(seeded_store, categorizer, ledger_script())(a)
+    assert r.correlation_id == a.correlation_id == "job_t"
+    with pytest.raises(ValidationError):
+        a.correlation_id = "job_other"
+    with pytest.raises(ValidationError):
+        r.status = "completed"
+    with pytest.raises(ValidationError):  # a result without the job's ID is not a valid handoff
+        AgentResult(task_id="t", agent="ledger_analyst", status="completed")
+
+
+def test_result_with_another_jobs_correlation_id_is_discarded(seeded_store):
+    stub = _stub(claims=[{"text": "Smuggled claim.", "evidence_ids": ["e1"]}], outputs={"pct_variance": "99"})
+    impostor = lambda a: stub(a).model_copy(update={"correlation_id": "job_other"})  # noqa: E731
+    out = _supervisor(seeded_store, {"ledger_analyst": impostor}).run("Is my October spend unusual?",
+                                                                       correlation_id="job_mine")
+    [r] = out["results"]
+    assert r["status"] == "failed" and r["correlation_id"] == "job_mine" and r["claims"] == [] and r["outputs"] == {}
+    assert "correlation_id mismatch" in r["errors"][0] and out["status"] == "needs_review"
+    assert out["briefing"]["statements"] == [] and out["findings"] == []
+    dispatch = next(e for e in seeded_store.audit.events("job_mine") if e["action"] == "dispatch")
+    assert dispatch["reason"] == "failed" and "job_other" in dispatch["details_json"]
+
+
+# --- threshold rules (design §5.4) -------------------------------------------------------
+
+def _variance_job(audit, pct, category, **kw):
+    outputs = {"pct_variance": pct, "calc_run_id": "calc_1", **({"category": category} if category else {})}
+    decision = RoutingDecision(intent="historical_comparison",
+                               dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
+    return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": _stub(outputs=outputs)}, audit,
+                      clock=lambda: DEMO_AS_OF, **kw)
+
+
+@pytest.mark.parametrize(("category", "pct", "limit"), [
+    ("groceries", "12.00", None), ("property_tax", "12.00", "10"), ("groceries", "15.01", "15"),
+    ("utilities", "-20", "15"), (None, "15.00", None), ("property_tax", "10.00", None),
+])
+def test_category_variance_uses_15pct_default_and_10pct_property_tax(seeded_store, category, pct, limit):
+    out = _variance_job(seeded_store.audit, pct, category).run("x")
+    if limit is None:
+        assert out["findings"] == [] and out["status"] == "completed"
+    else:
+        [f] = out["findings"]
+        assert f["threshold_pct"] == limit and f["category"] == category and out["status"] == "needs_review"
+
+
+@settings(max_examples=40, deadline=None)
+@given(st.decimals(min_value=-100, max_value=100, places=2),
+       st.sampled_from(["property_tax", "groceries", "utilities", "hoa_dues", None]))
+def test_a_variance_is_flagged_exactly_when_above_its_category_threshold(pct, category):
+    conn = sqlite3.connect(":memory:")
+    out = _variance_job(AuditLog(conn), str(pct), category).run("x")
+    limit = Decimal("10") if category == "property_tax" else Decimal("15")
+    assert variance_threshold(category) == limit
+    assert bool(out["findings"]) == (abs(pct) > limit) == (out["status"] == "needs_review")
+    conn.close()
+
+
+# --- review interrupt (design §5.3), only with a checkpointer ----------------------------
+
+PRIVATE = "acct_alex_checking"
+
+
+def _review_job(seeded_store, status="completed", accounts=(RENTAL,), pct="16.36"):
+    outputs = {"pct_variance": pct, "category": "property_tax", "calc_run_id": "calc_1", "account_ids": list(accounts)}
+    stub = _stub(status, outputs=outputs)
+    decision = RoutingDecision(intent="historical_comparison",
+                               dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
+    sup = Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": stub}, seeded_store.audit,
+                     clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=seeded_store.authorizer)
+    return sup, stub
+
+
+def _reviews(audit, cid):
+    return [(e["actor_id"], e["decision"]) for e in audit.events(cid) if e["action"] == "review"]
+
+
+def test_without_a_checkpointer_there_is_no_review_node(seeded_store):
+    sup, _ = _review_job(seeded_store)
+    assert "review" not in sup.build().get_graph().nodes and "review" in sup.build(InMemorySaver()).get_graph().nodes
+    out = sup.run("x", correlation_id="j_plain")
+    assert out["status"] == "needs_review" and "__interrupt__" not in out
+    assert _reviews(seeded_store.audit, "j_plain") == []
+
+
+def test_finding_pauses_for_review_and_an_authorized_member_resolves_it(seeded_store):
+    sup, stub = _review_job(seeded_store)
+    saver = InMemorySaver()
+    out = sup.run("x", correlation_id="j_rev", checkpointer=saver)
+    [intr] = out["__interrupt__"]
+    assert out["status"] == "awaiting_review" and "briefing" not in out
+    assert intr.value["kind"] == "supervisor_review" and intr.value["correlation_id"] == "j_rev"
+    assert intr.value["findings"][0]["threshold_pct"] == "10" and intr.value["results"] == []
+    done = sup.resume("j_rev", {"reviewer": "jordan", "accepted": True, "note": "new assessment"}, checkpointer=saver)
+    assert done["status"] == "reviewed" and done["briefing"]["review"] == {
+        "reviewer": "jordan", "accepted": True, "note": "new assessment"}
+    assert len(stub.calls) == 1  # resuming does not re-dispatch the specialist
+    assert _reviews(seeded_store.audit, "j_rev") == [("jordan", "allow")]
+    assert seeded_store.audit.verify() > 0
+
+
+def test_incomplete_result_pauses_even_without_findings(seeded_store):
+    sup, _ = _review_job(seeded_store, status="needs_review", pct="1.00")
+    saver = InMemorySaver()
+    out = sup.run("x", correlation_id="j_inc", checkpointer=saver)
+    assert out["findings"] == [] and out["__interrupt__"][0].value["results"][0]["status"] == "needs_review"
+    done = sup.resume("j_inc", {"reviewer": "alex", "accepted": False}, checkpointer=saver)
+    assert done["status"] == "review_rejected" and done["review"]["accepted"] is False
+
+
+def test_clean_job_with_a_checkpointer_does_not_pause(seeded_store):
+    sup, _ = _review_job(seeded_store, pct="1.00")
+    out = sup.run("x", correlation_id="j_clean", checkpointer=InMemorySaver())
+    assert out["status"] == "completed" and "__interrupt__" not in out
+
+
+@pytest.mark.parametrize("reviewer", ["sam", "casey_cpa", "mallory", ""])
+def test_unauthorized_reviewer_is_refused_audited_and_the_job_keeps_waiting(seeded_store, reviewer):
+    sup, _ = _review_job(seeded_store)
+    saver = InMemorySaver()
+    sup.run("x", correlation_id="j_deny", checkpointer=saver)
+    out = sup.resume("j_deny", {"reviewer": reviewer, "accepted": True}, checkpointer=saver)
+    assert out["status"] == "awaiting_review" and out["review_denied_attempts"] == 1 and out["__interrupt__"]
+    assert _reviews(seeded_store.audit, "j_deny") == [(reviewer or "unknown", "deny")]
+    assert sup.resume("j_deny", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+
+
+def test_reviewer_needs_access_to_every_account_the_job_used(seeded_store):
+    sup, _ = _review_job(seeded_store, accounts=(RENTAL, PRIVATE))
+    saver = InMemorySaver()
+    sup.run("x", correlation_id="j_acct", checkpointer=saver)
+    out = sup.resume("j_acct", {"reviewer": "jordan", "accepted": True}, checkpointer=saver)
+    assert out["status"] == "awaiting_review"
+    deny = next(e for e in seeded_store.audit.events("j_acct") if e["action"] == "review")
+    assert deny["actor_id"] == "jordan" and deny["reason"].startswith(PRIVATE)
+    assert sup.resume("j_acct", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+
+
+def test_paused_review_survives_restart(tmp_path):
+    def open_all():
+        ledger = sqlite3.connect(tmp_path / "ledger.db")
+        ckpt = sqlite3.connect(tmp_path / "checkpoints.db", check_same_thread=False)  # own connection, as in approval
+        store = SimpleNamespace(audit=AuditLog(ledger), authorizer=Authorizer(ACCOUNTS))
+        return ledger, ckpt, store
+
+    ledger1, ckpt1, store1 = open_all()
+    _review_job(store1)[0].run("x", correlation_id="j_restart", checkpointer=SqliteSaver(ckpt1))
+    ledger1.close()
+    ckpt1.close()
+    ledger2, ckpt2, store2 = open_all()  # "new process"
+    sup2, stub2 = _review_job(store2)
+    out = sup2.resume("j_restart", {"reviewer": "jordan", "accepted": True}, checkpointer=SqliteSaver(ckpt2))
+    assert out["status"] == "reviewed" and stub2.calls == []
+    actions = [e["action"] for e in store2.audit.events("j_restart")]
+    assert actions == ["route", "dispatch", "threshold_check", "review", "compose_briefing"]
+    assert store2.audit.verify() == 5
+    ledger2.close()
+    ckpt2.close()
+
+
+# --- Ledger Analyst: ingest_statement ----------------------------------------------------
+
+def test_ledger_tools_include_ingest_but_prompt_prefers_query_ledger():
+    names = [t["function"]["name"] for t in LEDGER_TOOLS]
+    assert names == ["list_accounts", "query_ledger", "ingest_statement", "run_calculation"]
+    assert "prefer query_ledger" in LEDGER_PROMPT
+
+
+def test_ledger_can_ingest_a_statement_through_its_tool(store, categorizer):
+    csv_text = demo_statements()["2026_10_rental_checking.csv"]
+    steps = [call("ingest_statement", csv_text=csv_text, source_name="rental.csv"), final()]
+    r = _ledger(store, categorizer, steps)(assignment(purpose="statement_ingestion"))
+    assert r.status == "completed" and r.errors == [] and r.outputs == {}
+    assert any(e["action"] == "upload" and e["decision"] == "allow" for e in store.audit.events("job_t"))
+
+
+def test_ledger_ingest_of_another_members_statement_is_denied(store, categorizer):
+    csv_text = demo_statements()["2026_10_alex_checking.csv"]
+    steps = [call("ingest_statement", csv_text=csv_text, source_name="alex.csv"), final()]
+    r = _ledger(store, categorizer, steps, actor=JORDAN)(assignment(purpose="statement_ingestion"))
+    assert "ingest_statement: authorization_denied" in r.errors[0]
+    assert store.audit.events("job_t")[-1]["decision"] == "deny"
