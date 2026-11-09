@@ -78,6 +78,24 @@ def _txn_view(t: Transaction) -> dict[str, Any]:
     }
 
 
+def _left_out_view(notes: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a ledger tool result says about documents it did not (fully) use, merged over ``notes`` (one per query).
+
+    ``excluded``: documents whose rows were left out, by status (``unreconciled`` / ``unverified`` / ``qualified``);
+    ``excluded_rows``: how many rows that is; ``unverified_included``: unverified documents whose provisional rows
+    *were* returned. Agents read this structured field; nothing depends on matching error text.
+    """
+    excluded: dict[str, dict[str, Any]] = {"unreconciled": {}, "unverified": {}, "qualified": {}}
+    included: dict[str, Any] = {}
+    for n in notes:
+        for kind, docs in n["excluded"].items():
+            excluded[kind].update({d["document_id"]: d for d in docs})
+        included.update({d["document_id"]: d for d in n["unverified_included"]})
+    return {"excluded": {k: list(v.values()) for k, v in excluded.items()},
+            "excluded_rows": sum(d["rows_in_range"] for v in excluded.values() for d in v.values()),
+            "unverified_included": list(included.values())}
+
+
 @dataclass
 class ToolSession:
     store: LedgerStore
@@ -95,6 +113,8 @@ class ToolSession:
     ingest_csv_sha256: str | None = None
     calls: int = 0
     _seen: dict[str, Transaction] = field(default_factory=dict, repr=False)
+    _seen_in: dict[str, set[int]] = field(default_factory=dict, repr=False)  # transaction_id -> queries that returned it
+    _query_notes: list[dict[str, Any]] = field(default_factory=list, repr=False)  # per query: documents left out
 
     def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """Dispatch by name (used by agents and the MCP server); never raises."""
@@ -145,9 +165,17 @@ class ToolSession:
                 date.fromisoformat(start), date.fromisoformat(end),
                 include_provisional=include_provisional, merchant_normalized=merchant, at=self.clock(),
             )
+            left_out = self.store.left_out_documents(
+                self.actor, self.purpose, self.correlation_id, list(account_ids),
+                date.fromisoformat(start), date.fromisoformat(end), include_provisional=include_provisional,
+                at=self.clock())
+            query_no = len(self._query_notes)
+            self._query_notes.append(left_out)
             for t in txns:
                 self._seen[t.transaction_id] = t
-            return {"transactions": [_txn_view(t) for t in txns], "provisional_included": include_provisional}
+                self._seen_in.setdefault(t.transaction_id, set()).add(query_no)
+            return {"transactions": [_txn_view(t) for t in txns], "provisional_included": include_provisional,
+                    **_left_out_view([left_out])}
         return self._guard(run)
 
     def run_calculation(
@@ -167,7 +195,9 @@ class ToolSession:
             )
             return {"run_id": r.run_id, "fn": r.fn, "output": r.output, "input_hash": r.input_hash,
                     "output_hash": r.output_hash, "library_version": r.library_version,
-                    "provisional": r.provisional, "input_ids": r.input_ids}
+                    "provisional": r.provisional, "input_ids": r.input_ids,
+                    **_left_out_view([self._query_notes[q] for q in sorted(
+                        {q for i in r.input_ids for q in self._seen_in.get(i, ())})])}
         return self._guard(run)
 
     def ingest_statement(self, csv_text: str, source_name: str) -> dict[str, Any]:

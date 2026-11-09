@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from household_agent.reminders import (
     build_ics,
     draft_reminder,
     export_ics,
+    ics_filename,
     extract_due_date,
     transition,
 )
@@ -75,7 +77,7 @@ def test_ics_has_the_expected_fields(tmp_path):
     path, content = export_ics(approved(), tmp_path / "out", STAMP)
     lines = unfold(content)
     d = make()
-    assert path.read_bytes() == content and path.name == f"{d.reminder_id}.ics"
+    assert path.read_bytes() == content and path.name == ics_filename(d)
     assert lines[0] == "BEGIN:VCALENDAR" and lines[-1] == "END:VCALENDAR"
     assert f"UID:{d.reminder_id}@reminder.household-agent.local" in lines
     assert f"DTSTART;VALUE=DATE:{DUE.strftime('%Y%m%d')}" in lines
@@ -203,7 +205,9 @@ def test_draft_approve_creates_the_ics(seeded_store, tmp_path):
     [action] = done["briefing"]["actions_for_approval"]
     rid = action["reminder"]["reminder_id"]
     assert done["status"] == "reminder_created" and action["reminder"]["status"] == "created"
-    ics = (tmp_path / "ics" / f"{rid}.ics").read_bytes()
+    path = Path(done["reminder_file"])
+    assert path.parent == tmp_path / "ics" and path.name.startswith(rid + "-") and path.suffix == ".ics"
+    ics = path.read_bytes()
     assert f"DTSTART;VALUE=DATE:{DUE.strftime('%Y%m%d')}".encode() in ics and b"chunk_policy_1" in ics
     assert [a for a, _, _ in _events(seeded_store.audit, "j_ok")] == ["draft_reminder", "approve", "create_reminder"]
     assert seeded_store.audit.verify() > 0
@@ -275,3 +279,288 @@ def test_money_movement_is_still_refused_even_with_a_reminder_phrase(seeded_stor
 def test_reminder_tool_is_not_on_any_specialist_allowlist():
     names = {t["function"]["name"] for t in [*LEDGER_TOOLS, *POLICY_TOOLS]}
     assert not any("remind" in n for n in names)
+
+
+# --- review fixes: H1 rejected review, H2 refusal vocabulary, M5 dates, LOW items ------------------------------------
+
+import os  # noqa: E402
+from datetime import timedelta, timezone  # noqa: E402
+
+from langchain_core.messages import AIMessage  # noqa: E402
+
+from household_agent.agents import MAX_DENIED_ATTEMPTS, DispatchItem, RoutingDecision, flagged_evidence_ids  # noqa: E402
+from household_agent.reminders import due_date_from_request  # noqa: E402
+from test_agents import Scripted  # noqa: E402
+
+POLICY = DispatchItem(agent="policy_compliance", task="p", depends_on_ledger=False)
+
+
+def _fixed(**kw):
+    decision = RoutingDecision(**kw)
+    return lambda _r: (decision, "rules")
+
+
+def _two_results(bad_status="needs_review"):
+    """Specialist whose result depends on the task text: 'good' completes with chunk_policy_1; 'bad' has `bad_status`."""
+    def run(a):
+        good = a.task == "good"
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed" if good else bad_status, needs_review=not good,
+                           evidence_ids=["chunk_policy_1"] if good else ["chunk_untrusted"])
+    return run
+
+
+def _review_job(store, tmp_path):
+    plan = [DispatchItem(agent="policy_compliance", task="good", depends_on_ledger=False),
+            DispatchItem(agent="policy_compliance", task="bad", depends_on_ledger=False)]
+    router = _fixed(intent="tax_context", dispatch_plan=plan, reminder_requested=True)
+    return Supervisor(ALEX, router, {"policy_compliance": _two_results()}, store.audit, clock=lambda: DEMO_AS_OF,
+                      members=MEMBERS, authorizer=store.authorizer, reminder_dir=tmp_path / "ics")
+
+
+def test_rejected_review_skips_the_reminder_and_keeps_its_status(seeded_store, tmp_path):
+    sup, saver = _review_job(seeded_store, tmp_path), InMemorySaver()
+    out = sup.run(REQUEST, correlation_id="j_h1r", checkpointer=saver)
+    assert out["status"] == "awaiting_review"
+    done = sup.resume("j_h1r", {"reviewer": "alex", "accepted": False, "note": "no"}, checkpointer=saver)
+    assert done["status"] == "review_rejected" and "reminder" not in done and "__interrupt__" not in done
+    assert done["briefing"]["actions_for_approval"] == []
+    assert any("no reminder was drafted" in q for q in done["briefing"]["questions"])
+    actions = [e["action"] for e in seeded_store.audit.events("j_h1r")]
+    assert "draft_reminder" not in actions and "create_reminder" not in actions
+    review = [e for e in seeded_store.audit.events("j_h1r") if e["action"] == "review"][-1]
+    assert json.loads(review["details_json"])["reminder_skipped"] is True
+    assert not (tmp_path / "ics").exists()
+
+
+def test_accepted_review_drafts_a_reminder_from_completed_results_only(seeded_store, tmp_path):
+    sup, saver = _review_job(seeded_store, tmp_path), InMemorySaver()
+    sup.run(REQUEST, correlation_id="j_h1a", checkpointer=saver)
+    done = sup.resume("j_h1a", {"reviewer": "alex", "accepted": True}, checkpointer=saver)
+    assert done["status"] == "awaiting_reminder_approval"
+    assert done["reminder"]["source_evidence_ids"] == ["chunk_policy_1"]  # the needs_review result's evidence is not used
+    final = sup.resume("j_h1a", {"approver": "alex", "approved": True}, checkpointer=saver)
+    assert final["status"] == "reminder_created"
+
+
+def test_evidence_from_flagged_documents_is_not_used_for_a_reminder(seeded_store):
+    def run(a):
+        if a.task == "ledger":
+            return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent="ledger_analyst",
+                               status="completed", evidence_ids=["calc_run_bad"],
+                               outputs={"data_quality": [{"document_id": "doc_bad", "status": "unreconciled",
+                                                          "source_name": "bad.csv", "issue_codes": ["x"]}],
+                                        "evidence_documents": {"calc_run_bad": ["doc_bad"]}})
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent="policy_compliance",
+                           status="completed", evidence_ids=["chunk_policy_1", "calc_run_bad"],
+                           outputs={"evidence_documents": {"calc_run_bad": ["doc_bad"]}})
+    plan = [DispatchItem(agent="ledger_analyst", task="ledger"), DispatchItem(agent="policy_compliance", task="p", depends_on_ledger=False)]
+    sup = Supervisor(ALEX, _fixed(intent="historical_comparison_and_tax_context", dispatch_plan=plan, reminder_requested=True),
+                     {"ledger_analyst": run, "policy_compliance": run}, seeded_store.audit, clock=lambda: DEMO_AS_OF)
+    out = sup.run(REQUEST, correlation_id="j_h1f")
+    assert out["reminder"]["source_evidence_ids"] == ["chunk_policy_1"]
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.dictionaries(st.sampled_from(["e1", "e2", "e3"]), st.lists(st.sampled_from(["d1", "d2", "d3"]), max_size=2)),
+       st.sets(st.sampled_from(["d1", "d2"])))
+def test_flagged_evidence_is_exactly_what_traces_to_a_flagged_document(mapping, flagged):
+    ids = flagged_evidence_ids([{"outputs": {"evidence_documents": mapping}}], flagged)
+    assert ids == flagged | {e for e, docs in mapping.items() if flagged & set(docs)}
+
+
+# H2
+
+def _model_router(**flags):
+    reply = RoutingDecision(intent="tax_context", dispatch_plan=[POLICY], **flags).model_dump_json()
+    return Router(Scripted(steps=[AIMessage(content=reply)]))
+
+
+@pytest.mark.parametrize("text", [
+    f"Remind me on {DUE.isoformat()} about the renewal and pay the invoice now",
+    "Remind me about the renewal and send money to the landlord",
+    "set a reminder for the renewal and wire $500 to savings",
+    "Remind me about the bill and then pay it", "Remind me in January and venmo Sam",
+    "Please pay the county tax bill", "move funds to brokerage"])
+def test_money_movement_is_refused_with_or_without_a_reminder_phrase(text):
+    assert rule_route(text).external_action_requested
+
+
+@pytest.mark.parametrize("text", [
+    f"Remind me to pay the county tax bill by {DUE.isoformat()}", REQUEST, "Why did our wireless bill go up?",
+    "Was the October payment unusual?", "remind me about paying the insurance on 2027-01-15"])
+def test_reminders_and_questions_about_payments_are_not_refused(text):
+    assert not rule_route(text).external_action_requested
+
+
+def test_a_model_yes_survives_a_rules_no_and_a_rules_yes_survives_a_model_no(seeded_store, tmp_path):
+    decision, source = _model_router(external_action_requested=True, reminder_requested=True)(REQUEST)
+    assert source == "model" and decision.external_action_requested is True  # rules say no, model says yes
+    stub = _stub()
+    sup = Supervisor(ALEX, _model_router(external_action_requested=True), {"policy_compliance": stub},
+                     seeded_store.audit, clock=lambda: DEMO_AS_OF)
+    assert sup.run(REQUEST, correlation_id="j_h2m")["status"] == "refused" and stub.calls == []
+    pay = f"Remind me on {DUE.isoformat()} about the renewal and pay the invoice now"
+    decision, _ = _model_router(external_action_requested=False)(pay)
+    assert decision.external_action_requested is True
+    out = Supervisor(ALEX, _model_router(external_action_requested=False), {"policy_compliance": stub},
+                     seeded_store.audit, clock=lambda: DEMO_AS_OF).run(pay, correlation_id="j_h2p")
+    assert out["status"] == "refused" and stub.calls == [] and "reminder" not in out
+
+
+def test_a_plain_reminder_with_a_model_router_is_still_allowed(seeded_store, tmp_path):
+    sup = Supervisor(ALEX, _model_router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: DEMO_AS_OF)
+    out = sup.run(REQUEST, correlation_id="j_h2ok")
+    assert out["status"] != "refused" and out["reminder"]["status"] == "draft"
+
+
+# M5
+
+def test_the_date_after_remind_wins_over_an_earlier_date():
+    text = "compare the 2025-12-01 bill; remind me on 2026-12-15"
+    assert due_date_from_request(text, TODAY) == date(2026, 12, 15)
+    assert due_date_from_request("remind me about the 2025-12-01 bill on 2026-12-15", TODAY) == date(2026, 12, 15)
+    assert due_date_from_request("on 2026-12-15 remind me", TODAY) == date(2026, 12, 15)  # only one date at all
+
+
+def test_several_dates_with_no_clear_reminder_date_are_refused_with_a_clear_message(seeded_store):
+    for text in ("add 2026-12-01 and 2026-12-15 to my calendar", "remind me about 2026-12-01 and 2026-12-15"):
+        with pytest.raises(ReminderError, match="several dates"):
+            due_date_from_request(text, TODAY)
+        assert extract_due_date(text, TODAY) is None
+    out = _sup(seeded_store, None).run("add 2026-12-01 and 2026-12-15 to my calendar", correlation_id="j_amb")
+    assert out["briefing"]["actions_for_approval"] == [] and any("several dates" in q for q in out["briefing"]["questions"])
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.dates(min_value=date(2027, 1, 1), max_value=date(2035, 12, 31)),
+       st.dates(min_value=date(2020, 1, 1), max_value=date(2026, 12, 31)))
+def test_the_reminder_date_is_found_whatever_other_dates_are_mentioned(due, other):
+    assert due_date_from_request(f"compare the {other.isoformat()} bill and remind me on {due.isoformat()}", TODAY) == due
+
+
+def test_the_job_date_comes_from_the_caller_not_the_utc_clock(seeded_store):
+    """Clock says 03:00 UTC on Nov 10, but the member's local day is still Nov 9."""
+    late = datetime(2026, 11, 10, 3, 0, tzinfo=UTC)
+    request = "add my renewal on 2026-11-09 to my calendar"
+    mk = lambda: Supervisor(ALEX, Router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: late)  # noqa: E731
+    refused = mk().run(request, correlation_id="j_utc")
+    assert any("past" in q for q in refused["briefing"]["questions"])  # without a local date the UTC date is used
+    ok = mk().run(request, correlation_id="j_local", today=date(2026, 11, 9))
+    assert ok["today"] == "2026-11-09" and ok["reminder"]["due_date"] == "2026-11-09"
+    assert due_date_from_request("remind me on March 3", date(2026, 11, 9)) == date(2027, 3, 3)
+    assert due_date_from_request("remind me on March 3", date(2026, 1, 9)) == date(2026, 3, 3)
+
+
+# LOW (a) DTSTAMP
+
+def test_dtstamp_is_converted_to_utc():
+    plus5 = datetime(2026, 11, 10, 2, 0, 0, tzinfo=timezone(timedelta(hours=5)))
+    assert "DTSTAMP:20261109T210000Z" in unfold(build_ics(make(), plus5))
+    assert "DTSTAMP:20261109T120000Z" in unfold(build_ics(make(), datetime(2026, 11, 9, 12, 0)))  # naive = UTC
+
+
+@settings(max_examples=40, deadline=None)
+@given(st.integers(min_value=-14, max_value=14))
+def test_dtstamp_names_the_same_instant_in_any_zone(hours):
+    local = STAMP.astimezone(timezone(timedelta(hours=hours)))
+    assert "DTSTAMP:20261109T120000Z" in unfold(build_ics(make(), local))
+
+
+# LOW (b) a reminder request with nothing to dispatch
+
+def test_a_reminder_request_with_an_empty_plan_gets_an_explicit_answer(seeded_store):
+    sup = Supervisor(ALEX, _fixed(intent="out_of_scope", reminder_requested=True), {}, seeded_store.audit,
+                     clock=lambda: DEMO_AS_OF)
+    out = sup.run(REQUEST, correlation_id="j_empty")
+    assert out["briefing"]["actions_for_approval"] == [] and any("evidence" in q for q in out["briefing"]["questions"])
+    assert ("draft_reminder", "alex", "deny") in [(e["action"], e["actor_id"], e["decision"])
+                                                  for e in seeded_store.audit.events("j_empty")]
+
+
+# LOW (c) export safety
+
+def test_export_refuses_symlinks_and_bad_ids(tmp_path):
+    d = approved()
+    real = tmp_path / "real"
+    real.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ReminderError, match="symbolic link"):
+        export_ics(d, link_dir, STAMP)
+    out = tmp_path / "out"
+    out.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    (out / ics_filename(d)).symlink_to(victim)
+    with pytest.raises(ReminderError, match="symbolic link"):
+        export_ics(d, out, STAMP)
+    assert victim.read_text() == "keep me"
+    for bad in ("../../etc/x", "rem_" + "g" * 16, "rem_abc", "REM_" + "0" * 16, ""):
+        with pytest.raises(ReminderError, match="reminder_id"):
+            export_ics(d.model_copy(update={"reminder_id": bad}), tmp_path / "never", STAMP)
+    assert not (tmp_path / "never").exists() and os.listdir(real) == []
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.text(max_size=30))
+def test_only_well_formed_reminder_ids_make_a_file_name(rid):
+    import re
+    d = approved().model_copy(update={"reminder_id": rid})
+    if re.fullmatch(r"rem_[0-9a-f]{16}", rid):
+        assert ics_filename(d).startswith(rid) and "/" not in ics_filename(d)
+    else:
+        with pytest.raises(ReminderError):
+            ics_filename(d)
+
+
+def test_two_jobs_with_the_same_content_write_different_files(tmp_path):
+    a, b = approved(make(correlation_id="job_a")), approved(make(correlation_id="job_b"))
+    assert a.reminder_id == b.reminder_id and ics_filename(a) != ics_filename(b)
+    pa, _ = export_ics(a, tmp_path, STAMP)
+    pb, _ = export_ics(b, tmp_path, STAMP)
+    assert pa != pb and sorted(os.listdir(tmp_path)) == sorted([pa.name, pb.name])
+
+
+def test_a_symlinked_export_target_is_audited_and_the_reminder_stays_approved(seeded_store, tmp_path):
+    sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
+    out = sup.run(REQUEST, correlation_id="j_link", checkpointer=saver)
+    draft = ReminderDraft.model_validate(out["__interrupt__"][0].value["reminder"])
+    (tmp_path / "ics").mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    (tmp_path / "ics" / ics_filename(draft)).symlink_to(victim)
+    done = sup.resume("j_link", {"approver": "alex", "approved": True}, checkpointer=saver)
+    assert victim.read_text() == "keep me" and "reminder_file" not in done
+    assert done["briefing"]["actions_for_approval"][0]["reminder"]["status"] == "approved"
+    assert ("create_reminder", "alex", "deny") in _events(seeded_store.audit, "j_link")
+
+
+# LOW (d) denied-attempt caps
+
+def test_repeated_denied_review_attempts_block_the_job(seeded_store, tmp_path):
+    sup, saver = _review_job(seeded_store, tmp_path), InMemorySaver()
+    sup.run(REQUEST, correlation_id="j_cap_r", checkpointer=saver)
+    for n in range(1, MAX_DENIED_ATTEMPTS):
+        out = sup.resume("j_cap_r", {"reviewer": "mallory", "accepted": True}, checkpointer=saver)
+        assert out["review_denied_attempts"] == n and out["__interrupt__"] and out["status"] == "awaiting_review"
+    out = sup.resume("j_cap_r", {"reviewer": "mallory", "accepted": True}, checkpointer=saver)
+    assert "__interrupt__" not in out and out["status"] == "needs_review" and "reminder" not in out
+    assert out["briefing"]["review"]["blocked"] is True and out["briefing"]["actions_for_approval"] == []
+    reasons = [e["reason"] for e in seeded_store.audit.events("j_cap_r") if e["action"] == "review"]
+    assert len(reasons) == MAX_DENIED_ATTEMPTS + 1 and "blocked" in reasons[-1]
+    assert not (tmp_path / "ics").exists()
+
+
+def test_repeated_denied_reminder_approvals_stop_the_wait_and_never_create_the_file(seeded_store, tmp_path):
+    sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
+    sup.run(REQUEST, correlation_id="j_cap_a", checkpointer=saver)
+    for n in range(1, MAX_DENIED_ATTEMPTS):
+        out = sup.resume("j_cap_a", {"approver": "mallory", "approved": True}, checkpointer=saver)
+        assert out["reminder_denied_attempts"] == n and out["__interrupt__"]
+    out = sup.resume("j_cap_a", {"approver": "mallory", "approved": True}, checkpointer=saver)
+    assert "__interrupt__" not in out and out["status"] == "needs_review"
+    assert out["briefing"]["actions_for_approval"][0]["reminder"]["status"] == "draft"
+    assert not (tmp_path / "ics").exists()
+    denies = [e for e in _events(seeded_store.audit, "j_cap_a") if e[0] == "approve" and e[2] == "deny"]
+    assert len(denies) == MAX_DENIED_ATTEMPTS + 1

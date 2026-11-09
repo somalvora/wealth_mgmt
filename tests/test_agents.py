@@ -990,7 +990,7 @@ def test_reviewer_scope_covers_every_account_the_job_read_not_just_the_last_run(
 def test_a_query_only_job_still_reports_the_accounts_it_read(seeded_store, categorizer):
     steps = [call("query_ledger", account_ids=[PRIVATE], start="2026-10-01", end="2026-10-31"), final()]
     r = _ledger(seeded_store, categorizer, steps)(assignment())
-    assert r.outputs == {"account_ids": [PRIVATE]}
+    assert r.outputs["account_ids"] == [PRIVATE] and set(r.outputs) == {"account_ids", "evidence_documents"}
 
 
 def test_a_job_that_read_nothing_has_no_outputs(seeded_store, categorizer):

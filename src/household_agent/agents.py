@@ -71,7 +71,7 @@ from household_agent.reminders import (
     audit_reminder,
     draft_reminder,
     export_ics,
-    extract_due_date,
+    due_date_from_request,
     title_from_request,
     transition,
 )
@@ -86,6 +86,7 @@ Intent = Literal["historical_comparison", "tax_context", "historical_comparison_
 Status = Literal["completed", "needs_review", "failed", "budget_exhausted"]
 MAX_DISPATCHES = 8
 JOB_SECONDS = 300
+MAX_DENIED_ATTEMPTS = 5  # denied review / reminder-approval attempts before the job stops waiting (needs_review)
 MAX_QUERY_REFINEMENTS = 2
 VARIANCE_REVIEW_PCT = Decimal("15")  # design §5.4 default for any category or bill
 VARIANCE_REVIEW_PCT_BY_CATEGORY: dict[str, Decimal] = {"property_tax": Decimal("10")}  # §5.4 per-category override
@@ -337,29 +338,38 @@ BAD_DOCUMENT_STATUSES = frozenset({"unreconciled", "unverified"})
 def data_quality_entries(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Structured data-quality problems seen in a Ledger Analyst's tool observations (design §4.1/§4.2).
 
-    An ``ingest_statement`` result that is unreconciled or unverified, and a ``query_ledger`` /
-    ``run_calculation`` error saying a document or transaction is unreconciled. Read from tool
-    observations only, never from model text. Nothing is repaired or re-ingested here.
+    Three sources, all read from tool observations (never from model text or error wording): an
+    ``ingest_statement`` result that is unreconciled or unverified; and the explicit ``excluded`` /
+    ``unverified_included`` fields that ``query_ledger`` and ``run_calculation`` return, which list the
+    unreconciled or unverified documents the query touched. One entry per document ID (the first seen wins).
+    Nothing is repaired or re-ingested here.
     """
-    entries: list[dict[str, Any]] = []
+    entries: dict[Any, dict[str, Any]] = {}
     for o in observations:
         r = o["result"]
-        if o["tool"] == "ingest_statement" and r.get("ok"):
+        if not r.get("ok"):
+            continue
+        if o["tool"] == "ingest_statement":
             if r.get("status") in BAD_DOCUMENT_STATUSES or r.get("unverified") is True:
-                entries.append({
+                entries.setdefault(r.get("document_id"), {
                     "source": "ingest_statement", "document_id": r.get("document_id"),
                     "source_name": (o.get("args") or {}).get("source_name"),
                     "status": "unverified" if r.get("status") not in BAD_DOCUMENT_STATUSES else r["status"],
                     "issue_codes": sorted({i["code"] for i in r.get("issues", [])}),
                     "document_confidence": r.get("document_confidence"),
                     "message": "statement did not reconcile or could not be verified"})
-        elif o["tool"] in ("query_ledger", "run_calculation") and not r.get("ok"):
-            message = str(r.get("error", {}).get("message", ""))
-            if "unreconciled" in message:
-                entries.append({"source": o["tool"], "document_id": None, "source_name": None,
-                                "status": "unreconciled", "issue_codes": [], "document_confidence": None,
-                                "message": message})
-    return entries
+        elif o["tool"] in ("query_ledger", "run_calculation"):
+            excluded = r.get("excluded") or {}
+            found = [(kind, d, "its rows were left out of the result") for kind in ("unreconciled", "unverified")
+                     for d in excluded.get(kind, [])]
+            found += [("unverified", d, "its provisional rows were returned; figures from them are left out of the briefing")
+                      for d in r.get("unverified_included", [])]
+            for kind, d, how in found:
+                entries.setdefault(d["document_id"], {
+                    "source": o["tool"], "document_id": d["document_id"], "source_name": d.get("source_name"),
+                    "status": kind, "issue_codes": list(d.get("issue_codes", [])),
+                    "document_confidence": d.get("document_confidence"), "message": f"{kind} document: {how}"})
+    return list(entries.values())
 
 
 def _errors(loop: _LoopState) -> list[str]:
@@ -415,6 +425,14 @@ class LedgerAnalyst:
         accounts = sorted({*queried.values(), *(x for c in calculations for x in c["account_ids"])})
         if accounts:  # reviewer scope: every account whose transactions this job read, not just the last run's
             outputs = {**outputs, "account_ids": accounts}
+        # Which source document(s) each piece of evidence came from, so a claim that cites a calculation run can be
+        # traced back to the statements behind it (a run's evidence includes its input transactions).
+        documents = {eid: sorted({t["source_document_id"] for t in [e, *e.get("inputs", [])]
+                                  if t.get("source_document_id")})
+                     for eid, e in evidence.items()}
+        documents = {eid: docs for eid, docs in documents.items() if docs}
+        if documents:
+            outputs = {**outputs, "evidence_documents": documents}
         quality = data_quality_entries(loop["observations"])
         if quality:  # surfaced for the Supervisor's threshold check; keeps every other output field
             outputs = {**outputs, "data_quality": quality}
@@ -494,8 +512,14 @@ class PolicyCompliance:
 
 # --- routing -----------------------------------------------------------------------------
 
-_EXTERNAL = re.compile(r"\b(pay|transfer|wire|send money|move money|schedule a payment|make a payment)\b", re.I)
-_MOVE_MONEY = re.compile(r"\b(transfer|wire|send money|move money|schedule a payment|make a payment)\b", re.I)
+# Money movement. "pay" alone is refused too, except as the thing a reminder is about ("remind me to pay ...").
+_MOVE_MONEY = re.compile(
+    r"\b(transfer|wire|remit|withdraw|zelle|venmo|paypal|"
+    r"(?:send|sending|move|moving)\s+(?:the\s+|my\s+|our\s+|some\s+)?(?:money|funds|cash|\$\s?\d)|"
+    r"(?:schedule|make|submit|authori[sz]e)\s+(?:a\s+|the\s+)?(?:payment|pay))\b", re.I)
+_EXTERNAL = re.compile(_MOVE_MONEY.pattern + r"|\bpay\b", re.I)  # any money-movement wording (also used by the tool-name check)
+_PAY = re.compile(r"\bpay\b", re.I)
+_PAY_AS_REMINDER_TOPIC = re.compile(r"\b(?:to|about|for)\s+pay(?:ing)?\b", re.I)
 _REMINDER = re.compile(r"\b(remind me|set (?:up )?(?:a |an )?reminder|calendar reminder|add\b.{0,120}?\bto (?:my|the|our) calendar)",
                        re.I)
 _PLANNING = re.compile(r"\b(allocate|surplus|where should .* money|invest|capital allocation)\b", re.I)
@@ -508,8 +532,10 @@ def rule_route(request: str) -> RoutingDecision:
     if _PLANNING.search(request):
         return RoutingDecision(intent="allocation_planning", approval_required=True)
     reminder = bool(_REMINDER.search(request))
-    # "remind me to pay X" is a reminder; only real money movement is refused in that case.
-    external = bool(_MOVE_MONEY.search(request) if reminder else _EXTERNAL.search(request)) \
+    # "remind me to pay X" is a reminder (the payment is its topic). Any other money movement is refused, with or
+    # without a reminder phrase: "remind me about the renewal and pay the invoice now" is refused.
+    bare_pay = _PAY.search(_PAY_AS_REMINDER_TOPIC.sub(" ", request) if reminder else request)
+    external = bool(_MOVE_MONEY.search(request) or bare_pay) \
         and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
     ledger, policy = bool(_LEDGER.search(request)), bool(_POLICY.search(request))
     plan = ([DispatchItem(agent="ledger_analyst", task=request)] if ledger else []) + \
@@ -537,11 +563,11 @@ class Router:
         rules = rule_route(request)
         if decision.intent == "statement_ingestion":  # ingestion is started by the host, never chosen by a model
             return rules, "rules_fallback"
-        if _EXTERNAL.search(request) and rules.external_action_requested:
-            decision = decision.model_copy(update={"external_action_requested": True})  # never trust a model "no"
-        if rules.reminder_requested:  # the request text decides, not the model's flags
-            decision = decision.model_copy(update={"reminder_requested": True,
-                                                   "external_action_requested": rules.external_action_requested})
+        # A yes from either the rules or the model refuses: never trust a "no" from one over a "yes" from the other.
+        if rules.external_action_requested and not decision.external_action_requested:
+            decision = decision.model_copy(update={"external_action_requested": True})
+        if rules.reminder_requested and not decision.reminder_requested:  # the request text decides
+            decision = decision.model_copy(update={"reminder_requested": True})
         return decision, "model"
 
 
@@ -553,6 +579,7 @@ class JobState(TypedDict, total=False):
     requester: str  # the member who started the job
     request: str
     started_at: str
+    today: str  # the job's date (ISO), supplied by the caller or taken from the clock once at run(); never re-read
     routing: dict[str, Any]
     results: list[dict[str, Any]]
     dispatches: int
@@ -593,8 +620,19 @@ def _data_quality_text(f: Mapping[str, Any]) -> str:
     what = f.get("source_name") or f.get("document_id") or "a source document"
     codes = f", issues: {', '.join(f['issue_codes'])}" if f.get("issue_codes") else ""
     detail = "" if f.get("document_id") or f.get("source_name") else f" ({f.get('message')})"
-    return (f"Data-quality alert: {what} is {f.get('status')}{codes}{detail}. No figures were produced from it; "
+    return (f"Data-quality alert: {what} is {f.get('status')}{codes}{detail}. Any figures derived from it are left out of this briefing; "
             "it needs human data review before anything is calculated from it.")
+
+
+def flagged_evidence_ids(results: list[Mapping[str, Any]], flagged_docs: set[str]) -> set[str]:
+    """Evidence IDs that must not be cited: the flagged documents themselves, and every transaction or calculation
+    run whose source documents (``outputs["evidence_documents"]``, built by the Ledger Analyst) include one."""
+    ids = set(flagged_docs)
+    for r in results:
+        for evidence_id, docs in (r.get("outputs", {}).get("evidence_documents") or {}).items():
+            if flagged_docs.intersection(docs):
+                ids.add(evidence_id)
+    return ids
 
 
 def compose_briefing(state: JobState) -> dict[str, Any]:
@@ -602,7 +640,8 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     results = [AgentResult.model_validate(r) for r in state.get("results", [])]
     reminder, error = state.get("reminder"), state.get("reminder_error")
     quality = [f for f in state.get("findings", []) if f.get("type") == "data_quality"]
-    flagged_docs = {f["document_id"] for f in quality if f.get("document_id")}  # no figure may cite these
+    flagged_docs = {f["document_id"] for f in quality if f.get("document_id")}
+    flagged = flagged_evidence_ids(state.get("results", []), flagged_docs)  # no figure may cite these
     alerts = [{"kind": "data_quality", "document_id": f.get("document_id"), "source_name": f.get("source_name"),
                "issue_codes": f.get("issue_codes", []), "text": _data_quality_text(f)} for f in quality]
     actions = [] if not reminder else [{
@@ -612,7 +651,7 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     return {
         "intent": state["routing"]["intent"],
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
-                       for r in results for c in r.claims if not flagged_docs.intersection(c.evidence_ids)],
+                       for r in results for c in r.claims if not flagged.intersection(c.evidence_ids)],
         "alerts": alerts,
         "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else []),
         "actions_for_approval": actions,
@@ -786,7 +825,10 @@ class Supervisor:
                 return "refuse"
             if r["intent"] == "allocation_planning":
                 return "plan"
-            return "dispatch" if r["dispatch_plan"] else "compose"
+            if r["dispatch_plan"]:
+                return "dispatch"
+            # a reminder request with nothing to dispatch is not dropped: remind answers with an explicit open question
+            return "remind" if r.get("reminder_requested") else "compose"
 
         def refuse(state: JobState) -> JobState:
             self._audit(state, "external_action", "deny", "external actions are out of scope")
@@ -877,31 +919,51 @@ class Supervisor:
             denial = self._reviewer_denial(reviewer_id, state)
             if denial:  # audited; the job keeps waiting for someone who may decide
                 self._audit(state, "review", "deny", denial, actor_id=reviewer_id or "unknown")
-                return {"review_denied_attempts": state.get("review_denied_attempts", 0) + 1}
+                attempts = state.get("review_denied_attempts", 0) + 1
+                if attempts >= MAX_DENIED_ATTEMPTS:  # stop accepting attempts: the job is blocked for a person to look at
+                    self._audit(state, "review", "deny", f"{attempts} denied attempts; job blocked", attempts=attempts)
+                    return {"review_denied_attempts": attempts, "status": "needs_review",
+                            "review": {"reviewer": "", "accepted": False, "blocked": True,
+                                       "note": f"blocked after {attempts} denied attempts"}}
+                return {"review_denied_attempts": attempts}
             decision = {"reviewer": reviewer_id, "accepted": answer.get("accepted") is True,
                         "note": str(answer.get("note", ""))}
             status = "reviewed" if decision["accepted"] else "review_rejected"
+            skipped = bool(state["routing"].get("reminder_requested")) and not decision["accepted"]
             self._audit(state, "review", "allow", status, actor_id=reviewer_id, note=decision["note"],
-                        findings=len(state["findings"]), open_results=[r["task_id"] for r in open_results])
-            return {"review": decision, "status": status}
+                        findings=len(state["findings"]), open_results=[r["task_id"] for r in open_results],
+                        reminder_skipped=skipped)
+            out: JobState = {"review": decision, "status": status}
+            if skipped:
+                out["reminder_error"] = "the review was not accepted, so no reminder was drafted"
+            return out
 
         def after_review(state: JobState) -> str:
-            return "remind" if state.get("review") else "review"
+            review = state.get("review")
+            if not review:
+                return "review"
+            # only an accepted review goes on to a reminder; rejected or blocked keeps its status and goes to compose
+            return "remind" if review.get("accepted") else "compose"
 
         def remind(state: JobState) -> JobState:
             """Draft (only) a reminder from this job's own evidence. Audited here, once; the interrupt is in the next node."""
             if not state["routing"].get("reminder_requested"):
                 return {}
             now = self.clock()
-            evidence = sorted({i for r in state["results"] for i in r["evidence_ids"]})
-            due = extract_due_date(state["request"], now.date())
+            today = date.fromisoformat(state["today"]) if state.get("today") else now.date()
+            # Evidence only from completed results that carry no data-quality problem, and never from a flagged document.
+            quality_docs = {f["document_id"] for f in state.get("findings", [])
+                            if f.get("type") == "data_quality" and f.get("document_id")}
+            usable = [r for r in state["results"]
+                      if r["status"] == "completed" and not r["outputs"].get("data_quality")]
+            flagged = flagged_evidence_ids(state["results"], quality_docs)
+            evidence = sorted({i for r in usable for i in r["evidence_ids"]} - flagged)
             try:
-                if due is None:
-                    raise ReminderError("no deadline date found in the request (use YYYY-MM-DD)")
+                due = due_date_from_request(state["request"], today)
                 draft = draft_reminder(
                     title=title_from_request(state["request"]), due_date=due, evidence_ids=evidence[:MAX_EVIDENCE_IDS],
                     job_evidence_ids=evidence, household_id=self.actor.household_id,
-                    requested_by=self.actor.member_id, correlation_id=state["correlation_id"], today=now.date())
+                    requested_by=self.actor.member_id, correlation_id=state["correlation_id"], today=today)
             except ReminderError as exc:
                 self._audit(state, "draft_reminder", "deny", str(exc))
                 return {"reminder_error": str(exc)}
@@ -927,7 +989,13 @@ class Supervisor:
             if denial:  # audited; the reminder stays a draft and the job keeps waiting
                 audit_reminder(self.audit, draft, actor_id=approver_id or "unknown", action=Action.APPROVE.value,
                                decision="deny", reason=denial, at=self.clock())
-                return {"reminder_denied_attempts": state.get("reminder_denied_attempts", 0) + 1}
+                attempts = state.get("reminder_denied_attempts", 0) + 1
+                if attempts >= MAX_DENIED_ATTEMPTS:  # stop waiting; the reminder stays a draft, never created
+                    audit_reminder(self.audit, draft, actor_id=self.actor.member_id, action=Action.APPROVE.value,
+                                   decision="deny", reason=f"{attempts} denied attempts; reminder blocked",
+                                   at=self.clock(), attempts=attempts)
+                    return {"reminder_denied_attempts": attempts, "status": "needs_review"}
+                return {"reminder_denied_attempts": attempts}
             new = transition(draft, "approved" if answer.get("approved") is True else "rejected")
             audit_reminder(self.audit, new, actor_id=approver_id, action=Action.APPROVE.value, decision="allow",
                            reason=new.status, at=self.clock(), note=str(answer.get("note", "")))
@@ -935,6 +1003,8 @@ class Supervisor:
 
         def after_reminder_approval(state: JobState) -> str:
             status = state["reminder"]["status"]
+            if status == "draft" and state.get("reminder_denied_attempts", 0) >= MAX_DENIED_ATTEMPTS:
+                return "compose"
             return "reminder_approval" if status == "draft" else "reminder_create" if status == "approved" else "compose"
 
         def reminder_create(state: JobState) -> JobState:
@@ -946,9 +1016,9 @@ class Supervisor:
                 return {}
             try:
                 path, content = export_ics(draft, self.reminder_dir, now)
-            except OSError as exc:
+            except (OSError, ReminderError) as exc:
                 audit_reminder(self.audit, draft, actor_id=self.actor.member_id, action="create_reminder",
-                               decision="deny", reason=f"export failed: {type(exc).__name__}", at=now)
+                               decision="deny", reason=f"export failed: {type(exc).__name__}: {exc}"[:200], at=now)
                 return {}
             created = transition(draft, "created")
             audit_reminder(self.audit, created, actor_id=self.actor.member_id, action="create_reminder",
@@ -971,7 +1041,7 @@ class Supervisor:
             g.add_node("reminder_approval", reminder_approval)
             g.add_node("reminder_create", reminder_create)
             g.add_conditional_edges("threshold", after_threshold, ["review", "remind"])
-            g.add_conditional_edges("review", after_review, ["review", "remind"])
+            g.add_conditional_edges("review", after_review, ["review", "remind", "compose"])
             g.add_conditional_edges("remind", after_remind, ["reminder_approval", "compose"])
             g.add_conditional_edges("reminder_approval", after_reminder_approval,
                                     ["reminder_approval", "reminder_create", "compose"])
@@ -980,14 +1050,15 @@ class Supervisor:
             g.add_edge("threshold", "remind")
             g.add_edge("remind", "compose")
         g.add_edge(START, "classify")
-        g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "dispatch", "compose"])
+        g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "dispatch", "remind", "compose"])
         g.add_conditional_edges("dispatch", after_dispatch, ["dispatch", "threshold"])
         g.add_edge("refuse", "compose")
         g.add_edge("plan", "compose")
         g.add_edge("compose", END)
         return g.compile(checkpointer=checkpointer)
 
-    def run(self, request: str, *, correlation_id: str | None = None, checkpointer: Any = None) -> JobState:
+    def run(self, request: str, *, correlation_id: str | None = None, checkpointer: Any = None,
+            today: date | None = None) -> JobState:
         """Run one job. With a checkpointer (thread ID = correlation ID) it may stop at ``review``:
         the result then has ``status == "awaiting_review"`` and an ``__interrupt__`` payload."""
         graph = self.build(checkpointer)
@@ -997,7 +1068,9 @@ class Supervisor:
             config["configurable"] = {"thread_id": job_thread_id(self.actor.household_id, cid)}
         return graph.invoke({"correlation_id": cid, "household_id": self.actor.household_id,
                              "requester": self.actor.member_id, "request": request,
-                             "started_at": self.clock().isoformat()}, config)
+                             "started_at": self.clock().isoformat(),
+                             # the job's date: the caller's (e.g. the member's local date), else the clock's, fixed once
+                             "today": (today or self.clock().date()).isoformat()}, config)
 
     def resume(self, correlation_id: str, decision: Mapping[str, Any], *, checkpointer: Any,
                household_id: str | None = None) -> JobState:
