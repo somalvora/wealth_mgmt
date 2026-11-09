@@ -11,6 +11,9 @@ from an authorized ``query_ledger`` call, so a model can never feed invented num
 calculation.
 """
 
+import contextvars
+import hashlib
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -32,9 +35,24 @@ class ToolBudgetExceeded(RuntimeError):
     pass
 
 
+class JobCancelled(RuntimeError):
+    """The job's time limit passed (or the job was cancelled): the tool refuses and does nothing."""
+
+
+class StatementMismatchError(PermissionError):
+    """``ingest_statement`` was called with CSV text other than the statement the task supplied."""
+
+
+# Set by the Supervisor for each dispatched specialist (in that task's own context). A specialist that outlives the job
+# time limit cannot be killed, so the Supervisor sets this event and every tool call after that is refused.
+CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("cancel_event", default=None)
+
+
 _ERROR_TYPES: tuple[tuple[type[BaseException], str], ...] = (
     (AuthorizationError, "authorization_denied"),
     (ToolBudgetExceeded, "budget_exhausted"),
+    (JobCancelled, "job_cancelled"),
+    (StatementMismatchError, "statement_mismatch"),
     (IneligibleInputError, "ineligible_input"),
     (DuplicateDocumentError, "duplicate_document"),
     (StatementParseError, "invalid_statement"),
@@ -70,6 +88,11 @@ class ToolSession:
     acting_agent: str | None = None
     max_calls: int | None = None
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    cancel: threading.Event | None = None  # set => every tool call is refused before it touches anything
+    # Agent sessions pin ingestion to the statement the task supplied (its SHA-256); None with
+    # ``restrict_ingest`` means the task supplied none, so ingest_statement is refused. Host/MCP sessions leave it off.
+    restrict_ingest: bool = False
+    ingest_csv_sha256: str | None = None
     calls: int = 0
     _seen: dict[str, Transaction] = field(default_factory=dict, repr=False)
 
@@ -89,6 +112,8 @@ class ToolSession:
 
     def _guard(self, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
+            if self.cancel is not None and self.cancel.is_set():
+                raise JobCancelled("the job time limit passed; this tool call was not run")
             self._charge()
             return {"ok": True, **fn()}
         except tuple(t for t, _ in _ERROR_TYPES) as exc:
@@ -147,6 +172,17 @@ class ToolSession:
 
     def ingest_statement(self, csv_text: str, source_name: str) -> dict[str, Any]:
         def run() -> dict[str, Any]:
+            if self.restrict_ingest:
+                digest = hashlib.sha256(csv_text.encode()).hexdigest()
+                if self.ingest_csv_sha256 is None or digest != self.ingest_csv_sha256:
+                    reason = ("the task supplied no statement to ingest" if self.ingest_csv_sha256 is None
+                              else "csv_text does not match the statement the task supplied")
+                    self.store.audit.append(
+                        correlation_id=self.correlation_id, actor_id=self.actor.member_id,
+                        household_id=self.actor.household_id, acting_agent=self.acting_agent,
+                        action="ingest_statement", purpose=self.purpose, decision="deny", reason=reason,
+                        details={"csv_sha256": digest, "source_name": source_name}, at=self.clock())
+                    raise StatementMismatchError(reason)
             r = ingest_statement(self.store, self.categorizer, self.actor, csv_text.encode(), source_name,
                                  purpose=self.purpose, correlation_id=self.correlation_id, at=self.clock(),
                                  allow_pdf=False)  # the agent tool is CSV text only

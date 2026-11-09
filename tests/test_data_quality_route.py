@@ -24,10 +24,11 @@ from test_agents import Scripted, call, final
 CORRUPT = "2026_09_alex_checking_corrupt.csv"
 
 
-def _job(store, categorizer, steps, actor=ALEX):
+def _job(store, categorizer, steps, actor=ALEX, csv_text=demo_statements()[CORRUPT]):
     ledger = LedgerAnalyst(Scripted(steps=steps), store, categorizer, actor, clock=lambda: DEMO_AS_OF)
-    decision = RoutingDecision(intent="historical_comparison",
-                               dispatch_plan=[DispatchItem(agent="ledger_analyst", task="ingest")])
+    decision = RoutingDecision(intent="statement_ingestion",  # ingest_statement is offered only for this intent
+                               dispatch_plan=[DispatchItem(agent="ledger_analyst", task="ingest",
+                                                           inputs={"csv_text": csv_text})])
     return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": ledger}, store.audit,
                       clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=store.authorizer)
 
@@ -69,7 +70,7 @@ def test_dependent_or_unknown_resolver_is_refused_and_audited(store, categorizer
 def test_reconciled_document_produces_no_finding_and_no_pause(store, categorizer):
     csv_text = demo_statements()["2026_10_alex_checking.csv"]
     steps = [call("ingest_statement", csv_text=csv_text, source_name="ok.csv"), final()]
-    out = _job(store, categorizer, steps).run("ingest", correlation_id="j_ok", checkpointer=InMemorySaver())
+    out = _job(store, categorizer, steps, csv_text=csv_text).run("ingest", correlation_id="j_ok", checkpointer=InMemorySaver())
     assert out["findings"] == [] and "__interrupt__" not in out and out["briefing"]["alerts"] == []
 
 
@@ -110,7 +111,8 @@ def test_unreconciled_errors_from_query_or_calculation_become_entries():
 def _assignment():
     from household_agent.agents import TaskAssignment
     return TaskAssignment(task_id="task_t", correlation_id="job_t", assigned_agent="ledger_analyst",
-                          purpose="historical_comparison", authorized_scope={"household_id": "hh_demo"}, task="t")
+                          purpose="statement_ingestion", authorized_scope={"household_id": "hh_demo"}, task="t",
+                          inputs={"csv_text": demo_statements()[CORRUPT]})
 
 
 @settings(max_examples=60, deadline=None)

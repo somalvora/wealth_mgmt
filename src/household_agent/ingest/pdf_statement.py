@@ -16,7 +16,8 @@ Expected text layer (one item per line, as most bank PDFs extract)::
 
 Limits and safety:
 - Only an extractable text layer is read. A PDF with none (a scan) is rejected: OCR is not built.
-- Encrypted, oversize (bytes or pages) and corrupt files are rejected before any text is used.
+- Encrypted, oversize (bytes, pages, extracted characters or lines) and corrupt files are rejected before any
+  text is used. Any exception from pypdf becomes a ``StatementParseError`` naming only the exception type.
 - The text is untrusted data. It is only matched against fixed patterns; nothing in it is executed
   or interpreted as an instruction, and pypdf does not run embedded JavaScript or launch actions.
 - A date-led line that does not match the row pattern, or a running balance that disagrees with the
@@ -30,7 +31,6 @@ import re
 from datetime import date
 
 from pypdf import PdfReader
-from pypdf.errors import PyPdfError
 
 from household_finance import MoneyError, to_minor
 
@@ -47,6 +47,8 @@ PARSER_VERSION = "hh_pdf_parser_1.0"
 PDF_MAGIC = b"%PDF-"
 MAX_PDF_BYTES = 5 * 1024 * 1024
 MAX_PDF_PAGES = 20
+MAX_TEXT_CHARS = 400_000  # cumulative extracted characters across all pages
+MAX_TEXT_LINES = 5_000  # cumulative non-empty lines
 
 _AMT = r"-?\$?-?[\d,]+\.\d{2}"
 _ROW_2 = re.compile(rf"^(\d{{4}}-\d{{2}}-\d{{2}})\s+(.+?)\s+({_AMT})$")
@@ -68,19 +70,26 @@ def is_pdf(content: bytes) -> bool:
 def _extract_lines(content: bytes, source_name: str) -> list[str]:
     if len(content) > MAX_PDF_BYTES:
         raise StatementParseError(f"{source_name}: PDF larger than {MAX_PDF_BYTES} bytes")
+    lines: list[str] = []
+    chars = 0
     try:
         reader = PdfReader(io.BytesIO(content))
         if reader.is_encrypted:
             raise StatementParseError(f"{source_name}: encrypted PDF is not supported")
         if len(reader.pages) > MAX_PDF_PAGES:
             raise StatementParseError(f"{source_name}: more than {MAX_PDF_PAGES} pages")
-        texts = [page.extract_text() or "" for page in reader.pages]
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            chars += len(text)
+            if chars > MAX_TEXT_CHARS:
+                raise StatementParseError(f"{source_name}: more than {MAX_TEXT_CHARS} characters of extracted text")
+            lines.extend(ln for ln in (" ".join(raw.split()) for raw in text.splitlines()) if ln)
+            if len(lines) > MAX_TEXT_LINES:
+                raise StatementParseError(f"{source_name}: more than {MAX_TEXT_LINES} lines of extracted text")
     except StatementParseError:
         raise
-    except (PyPdfError, ValueError, KeyError, TypeError, IndexError, OSError, RecursionError) as exc:
-        raise StatementParseError(f"{source_name}: unreadable or corrupt PDF ({type(exc).__name__})") from exc
-    lines = [" ".join(ln.split()) for ln in "\n".join(texts).splitlines()]
-    lines = [ln for ln in lines if ln]
+    except Exception as exc:  # noqa: BLE001  pypdf raises many types on hostile input; none may escape or leak detail
+        raise StatementParseError(f"{source_name}: unreadable or corrupt PDF ({type(exc).__name__})") from None
     if not lines:
         raise StatementParseError(f"{source_name}: PDF has no extractable text layer; scanned statements "
                                   "need OCR, which is not built (unreconciled)")
@@ -128,7 +137,7 @@ def parse_statement_pdf(content: bytes, source_name: str) -> ParsedStatement:
     errors: list[RowError] = []
     running = header.opening_balance_minor
     for n, line in enumerate(lines[table_at + 1:], start=table_at + 2):
-        if _PAGE_FOOTER.match(line):
+        if _PAGE_FOOTER.match(line) or _TABLE_HEADER.match(line):  # footers and the header repeated on later pages
             continue
         m = (_ROW_3 if has_balance else _ROW_2).match(line)
         if not m:

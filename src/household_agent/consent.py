@@ -55,11 +55,12 @@ class ConsentStore:
             authorizer.add_grant(g)
 
     def grants(self) -> list[ConsentGrant]:
-        cur = self._conn.execute(
-            "SELECT g.grant_id, g.household_id, g.grantor_id, g.grantee_id, g.account_ids_json, "
-            "g.actions_json, g.purposes_json, g.effective_at, g.expires_at, g.version, r.revoked_at "
-            "FROM consent_grants g LEFT JOIN consent_revocations r USING (grant_id) ORDER BY g.grant_id"
-        )
+        with self._audit.lock:
+            cur = self._conn.execute(
+                "SELECT g.grant_id, g.household_id, g.grantor_id, g.grantee_id, g.account_ids_json, "
+                "g.actions_json, g.purposes_json, g.effective_at, g.expires_at, g.version, r.revoked_at "
+                "FROM consent_grants g LEFT JOIN consent_revocations r USING (grant_id) ORDER BY g.grant_id"
+            ).fetchall()
         return [
             ConsentGrant(
                 grant_id=r[0], household_id=r[1], grantor_id=r[2], grantee_id=r[3],
@@ -106,6 +107,10 @@ class ConsentStore:
         return Decision(True, "grantor owns every account in the grant")
 
     def grant(self, actor: Actor, grant: ConsentGrant, *, correlation_id: str, at: datetime) -> None:
+        with self._audit.lock:  # check, audit and insert are one step; shared with the ledger and audit log
+            self._grant_locked(actor, grant, correlation_id, at)
+
+    def _grant_locked(self, actor: Actor, grant: ConsentGrant, correlation_id: str, at: datetime) -> None:
         self._record(actor, "consent_grant", grant.grant_id, self._check_grant(actor, grant), correlation_id, at)
         self._conn.execute(
             "INSERT INTO consent_grants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -120,6 +125,10 @@ class ConsentStore:
         self._authorizer.add_grant(grant)
 
     def revoke(self, actor: Actor, grant_id: str, *, correlation_id: str, at: datetime) -> None:
+        with self._audit.lock:
+            self._revoke_locked(actor, grant_id, correlation_id, at)
+
+    def _revoke_locked(self, actor: Actor, grant_id: str, correlation_id: str, at: datetime) -> None:
         row = self._conn.execute(
             "SELECT g.grantor_id, r.grant_id FROM consent_grants g "
             "LEFT JOIN consent_revocations r USING (grant_id) WHERE g.grant_id = ?",

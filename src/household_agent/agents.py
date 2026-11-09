@@ -18,7 +18,8 @@ What the model is *not* trusted with:
 - **The briefing.** ``compose_briefing`` is deterministic and uses only validated claims,
   so the Supervisor cannot assert a fact that no specialist supported.
 - **Concurrency.** Items of the dispatch plan that do not need another item's output run at the same
-  time in a small thread pool (see ``_depends_on_earlier``); results and audit events still follow plan order.
+  time in a small thread pool (see ``_depends_on_earlier``). Results and the Supervisor's own ``dispatch`` audit events
+  follow plan order; the specialists' tool-call audit events are written as they happen and may interleave.
 - **Handoffs.** Both payloads carry the job's correlation ID; a result whose ID does not match
   its assignment is discarded and becomes a ``failed`` dispatch.
 
@@ -38,6 +39,7 @@ import contextvars
 import hashlib
 import json
 import re
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -74,19 +76,20 @@ from household_agent.reminders import (
     transition,
 )
 from household_agent.retrieval import COLLECTIONS, Claim, RetrievalRequestError, RetrievalService, validate_claims
-from household_agent.tools import ToolSession
+from household_agent.tools import CANCEL_EVENT, ToolSession
 from household_finance.money import format_minor
 
 AGENTS_VERSION = "agents_1.0"
 AgentName = Literal["ledger_analyst", "policy_compliance"]
 Intent = Literal["historical_comparison", "tax_context", "historical_comparison_and_tax_context",
-                 "allocation_planning", "out_of_scope"]
+                 "allocation_planning", "statement_ingestion", "out_of_scope"]
 Status = Literal["completed", "needs_review", "failed", "budget_exhausted"]
 MAX_DISPATCHES = 8
 JOB_SECONDS = 300
 MAX_QUERY_REFINEMENTS = 2
 VARIANCE_REVIEW_PCT = Decimal("15")  # design §5.4 default for any category or bill
 VARIANCE_REVIEW_PCT_BY_CATEGORY: dict[str, Decimal] = {"property_tax": Decimal("10")}  # §5.4 per-category override
+INGEST_PURPOSE = "statement_ingestion"  # the only task purpose for which the Ledger Analyst is offered ingest_statement
 REVIEW_WORKFLOW = "supervisor_review"
 REMINDER_WORKFLOW = "reminder_approval"
 PURPOSE_FOR_INTENT: dict[str, str] = {
@@ -94,6 +97,7 @@ PURPOSE_FOR_INTENT: dict[str, str] = {
     "historical_comparison_and_tax_context": "historical_comparison",
     "tax_context": "tax_preparation",
     "allocation_planning": "capital_allocation",
+    "statement_ingestion": INGEST_PURPOSE,
     "out_of_scope": "none",
 }
 
@@ -213,6 +217,7 @@ LEDGER_TOOLS = [
         {"fn": {"type": "string"}, "transaction_ids": _STR_LIST, "params": {"type": "object"},
          "allow_provisional": {"type": "boolean"}}, ["fn", "transaction_ids"]),
 ]
+LEDGER_READ_TOOLS = [t for t in LEDGER_TOOLS if t["function"]["name"] != "ingest_statement"]
 POLICY_TOOLS = [
     _fn("retrieve_verified", "Search authorized, verified sources.",
         {"query": {"type": "string"}, "collections": _STR_LIST, "tax_years": {"type": "array", "items": {"type": "integer"}},
@@ -374,26 +379,42 @@ class LedgerAnalyst:
     name: AgentName = "ledger_analyst"
 
     def __call__(self, a: TaskAssignment) -> AgentResult:
+        ingesting = a.purpose == INGEST_PURPOSE  # a read-only job is never offered ingest_statement
+        csv_text = a.inputs.get("csv_text")
         session = ToolSession(self.store, self.categorizer, self.actor, a.purpose, a.correlation_id,
-                              acting_agent=self.name, clock=self.clock)
-        loop = run_react(self.model, LEDGER_PROMPT, a, LEDGER_TOOLS, session.call, self.clock().date())
+                              acting_agent=self.name, clock=self.clock, cancel=CANCEL_EVENT.get(),
+                              restrict_ingest=True,
+                              ingest_csv_sha256=hashlib.sha256(csv_text.encode()).hexdigest()
+                              if ingesting and isinstance(csv_text, str) else None)
+        loop = run_react(self.model, LEDGER_PROMPT, a, LEDGER_TOOLS if ingesting else LEDGER_READ_TOOLS,
+                         session.call, self.clock().date())
         evidence: dict[str, Any] = {}
-        outputs: dict[str, Any] = {}
+        queried: dict[str, str] = {}  # transaction_id -> account_id, from every query_ledger result
+        calculations: list[dict[str, Any]] = []
         for o in loop["observations"]:
             r = o["result"]
             if not r.get("ok"):
                 continue
             if o["tool"] == "query_ledger":
                 evidence.update({t["transaction_id"]: _with_money(t) for t in r["transactions"]})
+                queried.update({t["transaction_id"]: t["account_id"] for t in r["transactions"]})
             elif o["tool"] == "run_calculation":
                 # a run's inputs are its provenance, so "October 2025" in a claim citing it is supported
                 inputs = [evidence[i] for i in r["input_ids"] if i in evidence]
                 evidence[r["run_id"]] = {**_with_money(r["output"]), "inputs": inputs}
                 # category picks the review threshold; account_ids scope who may resolve a review
                 categories = {t["category"] for t in inputs}
-                outputs = {**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"],
-                           "account_ids": sorted({t["account_id"] for t in inputs}),
-                           **({"category": categories.pop()} if len(categories) == 1 else {})}
+                calculations.append({**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"],
+                                     "account_ids": sorted({t["account_id"] for t in inputs}),
+                                     **({"category": categories.pop()} if len(categories) == 1 else {})})
+        outputs: dict[str, Any] = {}
+        if calculations:
+            # Top level = the latest run (kept for callers that read one run); "calculations" keeps every run so the
+            # threshold check sees each of them and a later run cannot hide an earlier one's variance.
+            outputs = {**calculations[-1], "calculations": calculations}
+        accounts = sorted({*queried.values(), *(x for c in calculations for x in c["account_ids"])})
+        if accounts:  # reviewer scope: every account whose transactions this job read, not just the last run's
+            outputs = {**outputs, "account_ids": accounts}
         quality = data_quality_entries(loop["observations"])
         if quality:  # surfaced for the Supervisor's threshold check; keeps every other output field
             outputs = {**outputs, "data_quality": quality}
@@ -422,8 +443,13 @@ class PolicyCompliance:
         passages: dict[str, dict[str, Any]] = {}
         searches = 0
 
+        cancel = CANCEL_EVENT.get()
+
         def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             nonlocal searches
+            if cancel is not None and cancel.is_set():
+                return {"ok": False, "error": {"type": "job_cancelled",
+                                               "message": "the job time limit passed; this tool call was not run"}}
             if searches > MAX_QUERY_REFINEMENTS:
                 return {"ok": False, "error": {"type": "budget_exhausted",
                                                "message": f"only {MAX_QUERY_REFINEMENTS} query refinements allowed"}}
@@ -509,6 +535,8 @@ class Router:
         except ValidationError:
             return rule_route(request), "rules_fallback"
         rules = rule_route(request)
+        if decision.intent == "statement_ingestion":  # ingestion is started by the host, never chosen by a model
+            return rules, "rules_fallback"
         if _EXTERNAL.search(request) and rules.external_action_requested:
             decision = decision.model_copy(update={"external_action_requested": True})  # never trust a model "no"
         if rules.reminder_requested:  # the request text decides, not the model's flags
@@ -521,6 +549,8 @@ class Router:
 
 class JobState(TypedDict, total=False):
     correlation_id: str
+    household_id: str  # the job's household, fixed at run(); every later check compares against this
+    requester: str  # the member who started the job
     request: str
     started_at: str
     routing: dict[str, Any]
@@ -543,6 +573,11 @@ def _pct(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def job_thread_id(household_id: str, correlation_id: str) -> str:
+    """Checkpoint thread for a job: namespaced by household so another household's ID can never address it."""
+    return f"{len(household_id)}:{household_id}:{correlation_id}"  # length-prefixed, so no two pairs share an ID
 
 
 def variance_threshold(category: str | None) -> Decimal:
@@ -589,6 +624,11 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     }
 
 
+def _calc_entries(outputs: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every calculation a result carries: its ``calculations`` list, else the result's own flat outputs."""
+    return list(outputs.get("calculations") or ([outputs] if outputs else []))
+
+
 def _depends_on_earlier(plan: list[DispatchItem], i: int) -> bool:
     """The dependency rule. A Policy item waits for the Ledger Analyst, because it is handed the Ledger's
     ``calc_outputs`` to check its claims against, when an earlier plan item is a ledger item and the Policy item
@@ -626,7 +666,7 @@ class Supervisor:
     def _audit(self, state: JobState, action: str, decision: str, reason: str, *, actor_id: str | None = None,
                **details: Any) -> None:
         self.audit.append(correlation_id=state["correlation_id"], actor_id=actor_id or self.actor.member_id,
-                          household_id=self.actor.household_id, acting_agent="supervisor", action=action,
+                          household_id=state.get("household_id") or self.actor.household_id, acting_agent="supervisor", action=action,
                           purpose=PURPOSE_FOR_INTENT.get(state.get("routing", {}).get("intent", ""), None),
                           decision=decision, reason=reason, details=details, at=self.clock())
 
@@ -637,7 +677,8 @@ class Supervisor:
         authorized (``resume``, for the job's purpose) on every account the job's results used.
         """
         reviewer = self.members.get(reviewer_id)
-        if reviewer is None or reviewer.household_id != self.actor.household_id:
+        job_household = state.get("household_id") or self.actor.household_id
+        if reviewer is None or reviewer.household_id != job_household:
             return "reviewer is not a member of this household"
         if reviewer.role not in APPROVER_ROLES:
             return f"{reviewer.role.value} may not resolve reviews"
@@ -662,25 +703,57 @@ class Supervisor:
             return AgentResult(task_id=assignment.task_id, correlation_id=assignment.correlation_id,
                                agent=specialist_name, status="failed", needs_review=True,
                                errors=[f"{type(exc).__name__}: {exc}"])
-        if result.correlation_id != assignment.correlation_id:  # not this job's result: use none of it
-            return AgentResult(task_id=assignment.task_id, correlation_id=assignment.correlation_id,
-                               agent=specialist_name, status="failed", needs_review=True,
-                               errors=[f"correlation_id mismatch: got {result.correlation_id!r}, "
-                                       f"expected {assignment.correlation_id!r}; result discarded"])
+        # Not this task's result (another job, another task, or another agent): use none of it.
+        for what, got, want in (("correlation_id", result.correlation_id, assignment.correlation_id),
+                                ("task_id", result.task_id, assignment.task_id),
+                                ("agent", result.agent, assignment.assigned_agent)):
+            if got != want:
+                return AgentResult(task_id=assignment.task_id, correlation_id=assignment.correlation_id,
+                                   agent=specialist_name, status="failed", needs_review=True,
+                                   errors=[f"{what} mismatch: got {got!r}, expected {want!r}; result discarded"])
+        return result
+
+    def _run_inline(self, a: TaskAssignment, seconds: float) -> AgentResult:
+        """A single-item batch runs on the caller's thread (so a connection that is bound to one thread keeps working),
+        still under the job's time limit: a timer sets the cancel event when the time is up, so the specialist's tool
+        calls are refused from then on, and a specialist that returns after the deadline is a ``failed`` result.
+        What this cannot do is interrupt a call that never returns; only the concurrent path can abandon one."""
+        cancel = threading.Event()
+        timer = threading.Timer(seconds, cancel.set)
+        timer.daemon = True
+        token = CANCEL_EVENT.set(cancel)
+        timer.start()
+        try:
+            result = self._run_one(a.assigned_agent, a)
+        finally:
+            timer.cancel()
+            CANCEL_EVENT.reset(token)
+        if cancel.is_set():
+            return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                               status="failed", needs_review=True,
+                               errors=["TimeoutError: specialist did not finish within the job time limit"])
         return result
 
     def _run_batch(self, assignments: list[TaskAssignment], seconds: float) -> dict[str, AgentResult]:
-        """Run assignments; one runs inline, several run concurrently. Keyed by task ID. Never raises.
+        """Run assignments under the job's remaining ``seconds``; one runs inline, several run concurrently.
+        Keyed by task ID. Never raises.
 
-        Only this method touches threads. A specialist that has not finished within the job's remaining
-        ``seconds`` becomes a ``failed`` result (its thread cannot be killed and is left to finish; it is not waited for).
+        Only this method touches threads. A concurrent specialist that has not finished in time becomes a ``failed``
+        result. Its thread cannot be killed, so it is not waited for; instead its cancel event is set and every tool
+        call it makes afterwards is refused (``ToolSession``), so it can no longer read or write anything.
         """
-        if len(assignments) <= 1:
-            return {a.task_id: self._run_one(a.assigned_agent, a) for a in assignments}
+        if not assignments:
+            return {}
+        if len(assignments) == 1:
+            return {assignments[0].task_id: self._run_inline(assignments[0], seconds)}
         pool = ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="specialist")
+        cancels = {a.task_id: threading.Event() for a in assignments}
+        futures: dict[str, Any] = {}
         try:
-            futures = {a.task_id: pool.submit(contextvars.copy_context().run, self._run_one, a.assigned_agent, a)
-                       for a in assignments}
+            for a in assignments:
+                ctx = contextvars.copy_context()
+                ctx.run(CANCEL_EVENT.set, cancels[a.task_id])
+                futures[a.task_id] = pool.submit(ctx.run, self._run_one, a.assigned_agent, a)
             deadline = datetime.now(UTC).timestamp() + seconds
             out: dict[str, AgentResult] = {}
             for a in assignments:
@@ -688,11 +761,15 @@ class Supervisor:
                     out[a.task_id] = futures[a.task_id].result(
                         timeout=max(deadline - datetime.now(UTC).timestamp(), 0.001))
                 except FutureTimeout:
+                    cancels[a.task_id].set()
                     out[a.task_id] = AgentResult(
                         task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent, status="failed",
                         needs_review=True, errors=["TimeoutError: specialist did not finish within the job time limit"])
             return out
         finally:
+            for task_id, fut in futures.items():  # anything still running (timeout or error above) loses its tools
+                if not fut.done():
+                    cancels[task_id].set()
             pool.shutdown(wait=False, cancel_futures=True)
 
     def build(self, checkpointer: Any = None):
@@ -731,8 +808,8 @@ class Supervisor:
             elapsed = (self.clock() - datetime.fromisoformat(state["started_at"])).total_seconds()
             out_of_time = elapsed > self.job_seconds
             slots = max(self.max_dispatches - state["dispatches"], 0)
-            calc_outputs = {r["outputs"]["calc_run_id"]: {k: v for k, v in r["outputs"].items() if k != "calc_run_id"}
-                            for r in results if r["outputs"].get("calc_run_id")}
+            calc_outputs = {c["calc_run_id"]: {k: v for k, v in c.items() if k != "calc_run_id"}
+                            for r in results for c in _calc_entries(r["outputs"]) if c.get("calc_run_id")}
             # Plan order decides who gets the remaining budget; denied items are always a suffix of the batch.
             jobs: list[tuple[DispatchItem, str, str | None, TaskAssignment | None]] = []
             for n, item in enumerate(batch):
@@ -772,11 +849,13 @@ class Supervisor:
                     f = {"type": "data_quality", "agent": r["agent"], "task_id": r["task_id"], **q}
                     if f not in findings:
                         findings.append(f)
-                pct, category = _pct(r["outputs"].get("pct_variance")), r["outputs"].get("category")
-                limit = variance_threshold(category)
-                if pct is not None and abs(pct) > limit:
-                    findings.append({"type": "material_variance", "pct_variance": str(pct), "threshold_pct": str(limit),
-                                     "category": category, "calc_run_id": r["outputs"]["calc_run_id"]})
+                for c in _calc_entries(r["outputs"]):  # every calculation, not just the last one
+                    pct, category = _pct(c.get("pct_variance")), c.get("category")
+                    limit = variance_threshold(category)
+                    if pct is not None and abs(pct) > limit:
+                        findings.append({"type": "material_variance", "pct_variance": str(pct),
+                                         "threshold_pct": str(limit), "category": category,
+                                         "calc_run_id": c["calc_run_id"]})
             if findings:
                 kinds = sorted({f["type"].replace("_", " ") for f in findings})
                 self._audit(state, "threshold_check", "info", ", ".join(kinds), findings=findings)
@@ -915,12 +994,35 @@ class Supervisor:
         cid = correlation_id or f"job_{uuid.uuid4().hex[:12]}"
         config: dict[str, Any] = {"recursion_limit": 3 * self.max_dispatches + 10}
         if checkpointer is not None:
-            config["configurable"] = {"thread_id": cid}
-        return graph.invoke({"correlation_id": cid, "request": request, "started_at": self.clock().isoformat()}, config)
+            config["configurable"] = {"thread_id": job_thread_id(self.actor.household_id, cid)}
+        return graph.invoke({"correlation_id": cid, "household_id": self.actor.household_id,
+                             "requester": self.actor.member_id, "request": request,
+                             "started_at": self.clock().isoformat()}, config)
 
-    def resume(self, correlation_id: str, decision: Mapping[str, Any], *, checkpointer: Any) -> JobState:
+    def resume(self, correlation_id: str, decision: Mapping[str, Any], *, checkpointer: Any,
+               household_id: str | None = None) -> JobState:
         """Resume a job paused at ``review`` with ``{"reviewer", "accepted", "note"}``; works from a new process
-        if the checkpointer is persistent (``SqliteSaver``)."""
-        return self.build(checkpointer).invoke(
-            Command(resume=dict(decision)),
-            {"configurable": {"thread_id": correlation_id}, "recursion_limit": 3 * self.max_dispatches + 10})
+        if the checkpointer is persistent (``SqliteSaver``).
+
+        The checkpoint thread is namespaced by household, and the household stored in the job at ``run()`` must be
+        this Supervisor's own: a Supervisor acting for another household gets a refusal (audited under the job's
+        household) and the job stays paused. ``household_id`` names the job's household (default: this actor's).
+        """
+        graph = self.build(checkpointer)
+        config = {"configurable": {"thread_id": job_thread_id(household_id or self.actor.household_id, correlation_id)},
+                  "recursion_limit": 3 * self.max_dispatches + 10}
+        snapshot = graph.get_state(config)
+        job = dict(snapshot.values or {})
+        who = str(decision.get("reviewer", "")) or self.actor.member_id
+        if not job:
+            self.audit.append(correlation_id=correlation_id, actor_id=who, household_id=self.actor.household_id,
+                              acting_agent="supervisor", action="resume", decision="deny",
+                              reason="no paused job with this ID in the household", at=self.clock())
+            return {"correlation_id": correlation_id, "status": "not_found"}
+        if job.get("household_id") != self.actor.household_id:
+            self.audit.append(correlation_id=correlation_id, actor_id=who, household_id=job.get("household_id", ""),
+                              acting_agent="supervisor", action="resume", decision="deny",
+                              reason=f"resuming actor is in household {self.actor.household_id!r}, not the job's",
+                              details={"requester": job.get("requester")}, at=self.clock())
+            return job  # type: ignore[return-value]  # unchanged: still paused
+        return graph.invoke(Command(resume=dict(decision)), config)

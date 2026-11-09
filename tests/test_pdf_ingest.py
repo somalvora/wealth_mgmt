@@ -227,3 +227,91 @@ def test_random_transactions_round_trip_through_pdf(txns, opening, balance_col):
     assert [(r.posted_at, r.amount_minor) for r in parsed.rows] == [(d, a) for d, _, a in txns]
     assert [r.description for r in parsed.rows] == [desc for _, desc, _ in txns]
     assert parsed.header.closing_balance_minor == opening + sum(a for _, _, a in txns)
+
+
+# --- review fixes: hostile input and repeated headers -------------------------------------
+
+from unittest import mock  # noqa: E402
+
+from household_agent.ingest import pdf_statement  # noqa: E402
+from household_agent.ingest.pdf_statement import MAX_TEXT_CHARS, MAX_TEXT_LINES  # noqa: E402
+
+
+@pytest.mark.parametrize("exc", [RecursionError("secret path /etc/x"), KeyError("k"), ValueError("v"),
+                                 OverflowError("o"), MemoryError("m"), AssertionError("a"), TypeError("t")])
+def test_any_pypdf_exception_becomes_a_parse_error_naming_only_its_type(exc):
+    with mock.patch.object(pdf_statement, "PdfReader", side_effect=exc):
+        with pytest.raises(StatementParseError) as info:
+            parse_statement_pdf(make_pdf(["hello"]), "h.pdf")
+    msg = str(info.value)
+    assert type(exc).__name__ in msg and "secret" not in msg and "/etc" not in msg
+
+
+@pytest.mark.parametrize("junk", [b"%PDF-1.7\n" + b"\x00" * 50, b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n",
+                                  b"%PDF-" + b"(" * 5000])
+def test_garbage_pdfs_fail_closed_with_a_parse_error(junk):
+    with pytest.raises(StatementParseError):
+        parse_statement_pdf(junk, "junk.pdf")
+
+
+def test_extracted_text_over_the_character_cap_is_refused():
+    line = "x" * 200
+    pdf = make_pdf([line] * (MAX_TEXT_CHARS // 200 + 50), per_page=40)
+    with pytest.raises(StatementParseError, match="characters|lines|pages"):
+        parse_statement_pdf(pdf, "big.pdf")
+
+
+def test_extracted_text_over_the_line_cap_is_refused():
+    pdf = make_pdf(["a"] * (MAX_TEXT_LINES + 50), per_page=45)
+    with pytest.raises(StatementParseError, match="lines|pages"):
+        parse_statement_pdf(pdf, "many.pdf")
+
+
+def test_line_cap_is_enforced_cumulatively_not_per_page():
+    with mock.patch.object(pdf_statement, "MAX_TEXT_LINES", 30), mock.patch.object(pdf_statement, "MAX_PDF_PAGES", 50):
+        with pytest.raises(StatementParseError, match="lines"):
+            parse_statement_pdf(make_pdf(["a b"] * 40, per_page=10), "cum.pdf")  # 4 pages of 10 lines
+
+
+def _rows(n):
+    return [(f"2026-10-{(i % 27) + 1:02d}", f"SHOP {i}", -(i + 1) * 100) for i in range(n)]
+
+
+def test_a_header_repeated_on_every_page_is_not_a_transaction_and_reconciliation_still_passes():
+    rows = _rows(30)
+    lines = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 1_000_000, rows)
+    head, body = lines[:9], lines[9:]
+    paged = list(head)
+    for i in range(0, len(body), 10):  # a fresh page every 10 rows, each repeating the table header
+        chunk = body[i:i + 10]
+        paged += (["Date Description Amount"] if i else []) + chunk
+    parsed = parse_statement_pdf(make_pdf(paged, per_page=12), "multi.pdf")
+    assert len(parsed.rows) == 30
+    assert [r.amount_minor for r in parsed.rows] == [a for _, _, a in rows]
+
+
+def test_header_repeat_matching_is_case_and_balance_column_tolerant():
+    rows = _rows(4)
+    lines = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 500_000, rows, balance_col=True)
+    lines.insert(11, "DATE  DESCRIPTION  AMOUNT  BALANCE")
+    assert len(parse_statement_pdf(make_pdf(lines), "c.pdf").rows) == 4
+
+
+def test_a_description_that_merely_starts_like_the_header_is_still_a_row():
+    rows = [("2026-10-02", "Date Description Amount club", -1500)]
+    lines = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 100_000, rows)
+    assert [r.description for r in parse_statement_pdf(make_pdf(lines), "d.pdf").rows] == ["Date Description Amount club"]
+
+
+@settings(max_examples=15, deadline=None)
+@given(st.integers(min_value=1, max_value=25), st.integers(min_value=3, max_value=12))
+def test_repeating_the_header_on_any_page_size_never_changes_the_parsed_rows(n, page):
+    rows = _rows(n)
+    lines = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 2_000_000, rows)
+    head, body = lines[:9], lines[9:]
+    paged = list(head)
+    for i in range(0, len(body), page):
+        paged += (["Date Description Amount"] if i else []) + body[i:i + page]
+    plain = parse_statement_pdf(make_pdf(lines), "p.pdf")
+    assert [(r.posted_at, r.amount_minor) for r in parse_statement_pdf(make_pdf(paged, per_page=page + 1), "q.pdf").rows] \
+        == [(r.posted_at, r.amount_minor) for r in plain.rows]
