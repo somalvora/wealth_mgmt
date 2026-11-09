@@ -101,6 +101,7 @@ VARIANCE_REVIEW_PCT_BY_CATEGORY: dict[str, Decimal] = {"property_tax": Decimal("
 INGEST_PURPOSE = "statement_ingestion"  # the only task purpose for which the Ledger Analyst is offered ingest_statement
 REVIEW_WORKFLOW = "supervisor_review"
 REMINDER_WORKFLOW = "reminder_approval"
+ALLOCATION_REVIEW_WORKFLOW = "allocation_review"
 PURPOSE_FOR_INTENT: dict[str, str] = {
     "historical_comparison": "historical_comparison",
     "historical_comparison_and_tax_context": "historical_comparison",
@@ -313,14 +314,44 @@ def run_react(model: BaseChatModel, system: str, assignment: TaskAssignment, too
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
+def _claims_from_text(text: str) -> tuple[list[ResultClaim], ValidationError | None]:
+    try:
+        return _FinalAnswer.model_validate_json(_FENCE.sub("", text.strip())).claims, None
+    except ValidationError as exc:
+        return [], exc
+
+
 def parse_final(state: _LoopState) -> tuple[list[ResultClaim], str | None]:
     last = state["messages"][-1]
     if not isinstance(last, AIMessage) or last.tool_calls:
         return [], None  # stopped by budget/retries; status explains why
+    claims, exc = _claims_from_text(str(last.text))
+    return (claims, None) if exc is None else ([], f"unparseable final answer: {exc.error_count()} validation error(s)")
+
+
+REPAIR_PROMPT = ("Your last reply was not valid JSON for the required schema (problems: {problems}). Reply again with only "
+                 "the JSON object: no commentary, no code fence, no tool calls. Do not add any fact or evidence ID you did not "
+                 "already have; every claim still has to be supported by the evidence above.")
+
+
+def repair_final(model: BaseChatModel, state: _LoopState) -> tuple[list[ResultClaim], str | None] | None:
+    """One retry for an unparseable final answer: show the model where its JSON was wrong (field paths and error
+    types only, never the offending values) and ask for the JSON again. Returns the new ``parse_final`` result, or
+    ``None`` if there was nothing to repair or the retry itself failed. The reply is validated and then goes through
+    the same claim checks as any other answer, so a repair cannot add support a claim did not already have."""
+    last = state["messages"][-1]
+    if not isinstance(last, AIMessage) or last.tool_calls:
+        return None
+    _, exc = _claims_from_text(str(last.text))
+    if exc is None:
+        return None
+    problems = "; ".join(f"{'.'.join(str(p) for p in e['loc']) or 'root'}: {e['type']}" for e in exc.errors()[:5])
     try:
-        return _FinalAnswer.model_validate_json(_FENCE.sub("", str(last.text).strip())).claims, None
-    except ValidationError as exc:
-        return [], f"unparseable final answer: {exc.error_count()} validation error(s)"
+        reply = model.invoke([*state["messages"], HumanMessage(REPAIR_PROMPT.format(problems=problems))])
+    except Exception:  # noqa: BLE001  a failed retry keeps the original parse error
+        return None
+    claims, exc2 = _claims_from_text(str(getattr(reply, "text", "")))
+    return (claims, None) if exc2 is None else ([], f"unparseable final answer after one repair retry: {exc2.error_count()} validation error(s)")
 
 
 def _with_money(output: Any) -> Any:
@@ -497,6 +528,12 @@ class PolicyCompliance:
 
         loop = run_react(self.model, POLICY_PROMPT, a, POLICY_TOOLS, call_tool, self.clock().date())
         claims, parse_error = parse_final(loop)
+        repaired = False
+        if parse_error:
+            retry = repair_final(self.model, loop)
+            if retry is not None:
+                claims, parse_error = retry
+                repaired = parse_error is None
         calc_outputs = {k: _with_money(v) for k, v in a.inputs.get("calc_outputs", {}).items()}
         verdicts = validate_claims(
             [Claim(c.text, c.kind, tuple(i for i in c.evidence_ids if i not in calc_outputs),
@@ -515,7 +552,7 @@ class PolicyCompliance:
         return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=self.name, status=status,
                            evidence_ids=sorted({i for c in kept for i in c.evidence_ids}), claims=kept,
                            questions=list(dict.fromkeys(questions)), needs_review=status != "completed",
-                           errors=errors)
+                           errors=errors, outputs={"final_answer_repaired": True} if repaired else {})
 
 
 # --- routing -----------------------------------------------------------------------------
@@ -602,6 +639,7 @@ class JobState(TypedDict, total=False):
     reminder: dict[str, Any]
     reminder_error: str
     reminder_denied_attempts: int
+    allocation_review_denied_attempts: int
     reminder_file: str
     allocation: dict[str, Any]
     status: str
@@ -878,7 +916,44 @@ class Supervisor:
             self._audit(state, "allocate", "deny" if record["status"] == "denied" else "info", record["status"],
                         run_id=record.get("run_id"), recommended=record.get("recommended"))
             status = {"recommended": "completed", "denied": "refused"}.get(record["status"], "needs_review")
+            if checkpointer is not None and record["status"] == "needs_review" and record.get("run_id"):
+                status = "awaiting_review"  # an evaluated answer the model got wrong or that has no valid plan: a person looks
             return {"allocation": record, "status": status}
+
+        def after_allocate(state: JobState) -> str:
+            return "allocation_review" if state.get("status") == "awaiting_review" else "compose"
+
+        def allocation_review(state: JobState) -> JobState:
+            # Nothing before interrupt() has side effects: on resume this node runs again from the top.
+            alloc = state["allocation"]
+            answer = interrupt({"kind": ALLOCATION_REVIEW_WORKFLOW, "correlation_id": state["correlation_id"],
+                                "run_id": alloc["run_id"], "recommended": alloc.get("recommended"),
+                                "ranked_first": alloc.get("ranked_first"), "best_valid": alloc.get("best_valid"),
+                                "flags": alloc.get("flags", []), "questions": alloc.get("questions", [])})
+            answer = answer if isinstance(answer, Mapping) else {}
+            reviewer_id = str(answer.get("reviewer", ""))
+            withheld = {"statements": [], "recommended": None, "rejected_by_review": True}
+            denial = self._reviewer_denial(reviewer_id, state)
+            if denial:  # audited; the job keeps waiting for someone who may decide
+                self._audit(state, "allocation_review", "deny", denial, actor_id=reviewer_id or "unknown")
+                attempts = state.get("allocation_review_denied_attempts", 0) + 1
+                if attempts >= MAX_DENIED_ATTEMPTS:  # stop accepting attempts; nothing is recommended
+                    self._audit(state, "allocation_review", "deny", f"{attempts} denied attempts; job blocked", attempts=attempts)
+                    review = {"reviewer": "", "accepted": False, "blocked": True,
+                              "note": f"blocked after {attempts} denied attempts"}
+                    return {"allocation_review_denied_attempts": attempts, "status": "needs_review",
+                            "allocation": {**alloc, **withheld, "review": review}}
+                return {"allocation_review_denied_attempts": attempts}
+            decision = {"reviewer": reviewer_id, "accepted": answer.get("accepted") is True,
+                        "note": str(answer.get("note", ""))}
+            status = "reviewed" if decision["accepted"] else "review_rejected"
+            self._audit(state, "allocation_review", "allow", status, actor_id=reviewer_id, note=decision["note"],
+                        run_id=alloc["run_id"])
+            return {"allocation": {**alloc, "review": decision, **({} if decision["accepted"] else withheld)},
+                    "status": status}
+
+        def after_allocation_review(state: JobState) -> str:
+            return "compose" if state["allocation"].get("review") else "allocation_review"
 
         def dispatch(state: JobState) -> JobState:
             """Run the next batch of the plan: one dependent item, or a run of independent items at once."""
@@ -1079,6 +1154,9 @@ class Supervisor:
             g.add_node("review", review)
             g.add_node("reminder_approval", reminder_approval)
             g.add_node("reminder_create", reminder_create)
+            g.add_node("allocation_review", allocation_review)
+            g.add_conditional_edges("allocate", after_allocate, ["allocation_review", "compose"])
+            g.add_conditional_edges("allocation_review", after_allocation_review, ["allocation_review", "compose"])
             g.add_conditional_edges("threshold", after_threshold, ["review", "remind"])
             g.add_conditional_edges("review", after_review, ["review", "remind", "compose"])
             g.add_conditional_edges("remind", after_remind, ["reminder_approval", "compose"])
@@ -1088,12 +1166,12 @@ class Supervisor:
         else:
             g.add_edge("threshold", "remind")
             g.add_edge("remind", "compose")
+            g.add_edge("allocate", "compose")
         g.add_edge(START, "classify")
         g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "allocate", "dispatch", "remind", "compose"])
         g.add_conditional_edges("dispatch", after_dispatch, ["dispatch", "threshold"])
         g.add_edge("refuse", "compose")
         g.add_edge("plan", "compose")
-        g.add_edge("allocate", "compose")
         g.add_edge("compose", END)
         return g.compile(checkpointer=checkpointer)
 
