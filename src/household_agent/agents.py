@@ -326,6 +326,37 @@ def _status(loop: _LoopState, parse_error: str | None, review: bool) -> Status:
     return "needs_review" if parse_error or review else "completed"
 
 
+BAD_DOCUMENT_STATUSES = frozenset({"unreconciled", "unverified"})
+
+
+def data_quality_entries(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Structured data-quality problems seen in a Ledger Analyst's tool observations (design §4.1/§4.2).
+
+    An ``ingest_statement`` result that is unreconciled or unverified, and a ``query_ledger`` /
+    ``run_calculation`` error saying a document or transaction is unreconciled. Read from tool
+    observations only, never from model text. Nothing is repaired or re-ingested here.
+    """
+    entries: list[dict[str, Any]] = []
+    for o in observations:
+        r = o["result"]
+        if o["tool"] == "ingest_statement" and r.get("ok"):
+            if r.get("status") in BAD_DOCUMENT_STATUSES or r.get("unverified") is True:
+                entries.append({
+                    "source": "ingest_statement", "document_id": r.get("document_id"),
+                    "source_name": (o.get("args") or {}).get("source_name"),
+                    "status": "unverified" if r.get("status") not in BAD_DOCUMENT_STATUSES else r["status"],
+                    "issue_codes": sorted({i["code"] for i in r.get("issues", [])}),
+                    "document_confidence": r.get("document_confidence"),
+                    "message": "statement did not reconcile or could not be verified"})
+        elif o["tool"] in ("query_ledger", "run_calculation") and not r.get("ok"):
+            message = str(r.get("error", {}).get("message", ""))
+            if "unreconciled" in message:
+                entries.append({"source": o["tool"], "document_id": None, "source_name": None,
+                                "status": "unreconciled", "issue_codes": [], "document_confidence": None,
+                                "message": message})
+    return entries
+
+
 def _errors(loop: _LoopState) -> list[str]:
     return [f"{o['tool']}: {o['result']['error']['type']}: {o['result']['error']['message']}"
             for o in loop.get("observations", []) if not o["result"].get("ok")]
@@ -363,6 +394,9 @@ class LedgerAnalyst:
                 outputs = {**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"],
                            "account_ids": sorted({t["account_id"] for t in inputs}),
                            **({"category": categories.pop()} if len(categories) == 1 else {})}
+        quality = data_quality_entries(loop["observations"])
+        if quality:  # surfaced for the Supervisor's threshold check; keeps every other output field
+            outputs = {**outputs, "data_quality": quality}
         claims, parse_error = parse_final(loop)
         verdicts = validate_claims([Claim(c.text, "calculated", calc_run_ids=tuple(c.evidence_ids)) for c in claims],
                                    [], evidence)
@@ -520,10 +554,22 @@ def _needs_review(state: JobState) -> bool:
     return bool(state.get("findings")) or any(r["status"] != "completed" for r in state.get("results", []))
 
 
+def _data_quality_text(f: Mapping[str, Any]) -> str:
+    what = f.get("source_name") or f.get("document_id") or "a source document"
+    codes = f", issues: {', '.join(f['issue_codes'])}" if f.get("issue_codes") else ""
+    detail = "" if f.get("document_id") or f.get("source_name") else f" ({f.get('message')})"
+    return (f"Data-quality alert: {what} is {f.get('status')}{codes}{detail}. No figures were produced from it; "
+            "it needs human data review before anything is calculated from it.")
+
+
 def compose_briefing(state: JobState) -> dict[str, Any]:
     """Deterministic: lists only validated claims, open questions and review flags."""
     results = [AgentResult.model_validate(r) for r in state.get("results", [])]
     reminder, error = state.get("reminder"), state.get("reminder_error")
+    quality = [f for f in state.get("findings", []) if f.get("type") == "data_quality"]
+    flagged_docs = {f["document_id"] for f in quality if f.get("document_id")}  # no figure may cite these
+    alerts = [{"kind": "data_quality", "document_id": f.get("document_id"), "source_name": f.get("source_name"),
+               "issue_codes": f.get("issue_codes", []), "text": _data_quality_text(f)} for f in quality]
     actions = [] if not reminder else [{
         "kind": "reminder", "reminder": reminder,
         "text": (f"Reminder \"{reminder['title']}\" due {reminder['due_date']} is {reminder['status']}. Approving it only "
@@ -531,7 +577,8 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     return {
         "intent": state["routing"]["intent"],
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
-                       for r in results for c in r.claims],
+                       for r in results for c in r.claims if not flagged_docs.intersection(c.evidence_ids)],
+        "alerts": alerts,
         "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else []),
         "actions_for_approval": actions,
         "findings": state.get("findings", []),
@@ -721,13 +768,18 @@ class Supervisor:
         def threshold(state: JobState) -> JobState:
             findings = []
             for r in state["results"]:
+                for q in r["outputs"].get("data_quality", []):
+                    f = {"type": "data_quality", "agent": r["agent"], "task_id": r["task_id"], **q}
+                    if f not in findings:
+                        findings.append(f)
                 pct, category = _pct(r["outputs"].get("pct_variance")), r["outputs"].get("category")
                 limit = variance_threshold(category)
                 if pct is not None and abs(pct) > limit:
                     findings.append({"type": "material_variance", "pct_variance": str(pct), "threshold_pct": str(limit),
                                      "category": category, "calc_run_id": r["outputs"]["calc_run_id"]})
             if findings:
-                self._audit(state, "threshold_check", "info", "material variance", findings=findings)
+                kinds = sorted({f["type"].replace("_", " ") for f in findings})
+                self._audit(state, "threshold_check", "info", ", ".join(kinds), findings=findings)
             if checkpointer is not None and _needs_review({**state, "findings": findings}):
                 return {"findings": findings, "status": "awaiting_review"}
             return {"findings": findings}
