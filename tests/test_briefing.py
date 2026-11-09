@@ -106,9 +106,11 @@ def test_plan_and_pending_approval_appear_under_actions(seeded_store):
 
 
 def test_supervisor_results_are_sorted_into_sections(seeded_store):
-    ledger = AgentResult(task_id="t1", agent="ledger_analyst", status="completed", evidence_ids=["calc_1"],
+    ledger = AgentResult(task_id="t1", correlation_id="brief", agent="ledger_analyst", status="completed",
+                         evidence_ids=["calc_1"],
                          claims=[ResultClaim(text="Property tax rose 16.36%.", evidence_ids=["calc_1"])])
-    policy = AgentResult(task_id="t2", agent="policy_compliance", status="needs_review", needs_review=True,
+    policy = AgentResult(task_id="t2", correlation_id="brief", agent="policy_compliance", status="needs_review",
+                         needs_review=True,
                          claims=[ResultClaim(text="Second installment is due by April 10.", evidence_ids=["doc_p"])],
                          questions=["I cannot verify the rule for this tax year."])
     finding = {"type": "material_variance", "pct_variance": "16.36", "threshold_pct": "10", "calc_run_id": "calc_1"}

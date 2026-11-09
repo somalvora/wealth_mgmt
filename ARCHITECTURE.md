@@ -49,7 +49,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.consent` | Persistent `ConsentStore`: append-only grants and revocations, grantor-only, audited, reloaded into `Authorizer` | 7 | (consent management) |
 | `household_agent.tools` | `ToolSession`: identity/purpose bound by the host, call budget, structured errors, session-scoped transaction IDs | 3.2, 4.1 | all Ledger Analyst tools |
 | `household_agent.mcp_server` | `household-finance-tools` FastMCP stdio server over `ToolSession`; identity from env | 3.2, 4.2 | (MCP transport) |
-| `household_agent.agents` | `Supervisor` graph (classify → dispatch loop → threshold → compose), `LedgerAnalyst` and `PolicyCompliance` ReAct subgraphs, `Router`, typed `TaskAssignment`/`AgentResult` | 4, 5.1 | (the agents) |
+| `household_agent.agents` | `Supervisor` graph (classify → dispatch loop → threshold → [review interrupt, with a checkpointer] → compose), `LedgerAnalyst` and `PolicyCompliance` ReAct subgraphs, `Router`, typed `TaskAssignment`/`AgentResult` | 4, 5.1 | (the agents) |
 | `household_agent.retrieval` | `RetrievalService` over ChromaDB: authorize-first `where` filters, MMR, per-passage verification, audit; `validate_claims` | 8 | `retrieve_verified`, `validate_claims` |
 | `household_agent.approval` | LangGraph `plan → approval(interrupt)` graph with a checkpointer; approver check and stale-input check | 5.8, 10 | (Supervisor approval subgraph) |
 | `household_agent.llm_planner` | `LLMThoughtGenerator` (model personas, pydantic-validated, template fallback) and `LLMCritic` (clamped, advisory) behind the planner protocols | 5.8 | (planner personas / critic) |
@@ -246,22 +246,28 @@ request ─► classify (Router: model JSON → RoutingDecision, else rule_route
              ├─ external action ─► refuse (audited deny) ─────────────┐
              ├─ allocation ─► plan: start approval graph (interrupt) ─┤
              └─ dispatch loop (≤ 8, ≤ 300 s) ─► threshold ─► compose ◄┘
-                  │ TaskAssignment(purpose from intent, scope from host)
-                  ▼
+                  │ TaskAssignment(correlation_id,     │   ▲
+                  │   purpose from intent,             │   │ (checkpointer only)
+                  │   scope from host)                 └─► review ── interrupt({kind, correlation_id,
+                  ▼                                            findings, results}) ──► caller
         specialist subgraph: agent ⇄ tools (≤ 6 calls, ≤ 2 retries/tool)
                   │ outputs/evidence copied from observations
                   │ claims re-checked by validate_claims
                   ▼
-        AgentResult(status, outputs, evidence_ids, claims, questions, errors)
+        AgentResult(correlation_id, status, outputs, evidence_ids, claims, questions, errors)
 ```
 
-- **Ledger Analyst.** Its tools are `list_accounts`, `query_ledger` and `run_calculation`, through a `ToolSession`. The first message gives the model its `tool_budget` and `today` (from the agent's clock; both specialists get it, since a model otherwise resolves "October" from its training date), and the prompt tells it to filter by merchant and month rather than widening and repeating queries (the first live Gemini run used up its budget that way). Claims may cite only the transaction IDs and calculation run IDs from this assignment (a run's evidence includes its input transactions, so a claim citing only the run can name their dates), and `*_minor` values are also matched in dollar form ("$450.00").
+- **Ledger Analyst.** Its tools are `list_accounts`, `query_ledger`, `ingest_statement` and `run_calculation`, through a `ToolSession`. `ingest_statement` is there so a task can hand it a CSV statement to load; the permission check (`upload` on the statement's account) stays inside `ToolSession`/`LedgerStore`, so a member can't ingest someone else's statement through the agent either. The prompt tells it to use `ingest_statement` only for a supplied statement and to prefer `query_ledger` for reads. A calculation's outputs also carry `category` (when all its input transactions share one) and the `account_ids` of its inputs, both copied from the query results: the first picks the review threshold, the second says whose accounts a reviewer must be able to see. The first message gives the model its `tool_budget` and `today` (from the agent's clock; both specialists get it, since a model otherwise resolves "October" from its training date), and the prompt tells it to filter by merchant and month rather than widening and repeating queries (the first live Gemini run used up its budget that way). Claims may cite only the transaction IDs and calculation run IDs from this assignment (a run's evidence includes its input transactions, so a claim citing only the run can name their dates), and `*_minor` values are also matched in dollar form ("$450.00").
 - **Policy & Compliance.** Its tool is `retrieve_verified`, allowing 1 search plus 2 refinements. Claims are validated against the passages from this assignment and against calculation outputs the Supervisor passed in as run IDs. `rephrase_as_question` verdicts become questions; `remove` verdicts are dropped and recorded as errors.
+- **Handoff payloads.** `TaskAssignment` and `AgentResult` are frozen pydantic models and both carry the job's `correlation_id` (design §4.2). Specialists copy it from the assignment. If a result comes back with a different ID, the Supervisor throws the whole result away (claims, outputs, evidence) and records a `failed` dispatch with a `correlation_id mismatch` error instead of crashing. A result that isn't for this job can't be trusted for anything.
 - **Supervisor.**
   - It never calls the ledger or the vector store.
   - A specialist that raises an exception becomes a `failed` result.
+  - **Threshold check (design §5.4).** A variance above 15% in any category is a `material_variance` finding; property tax overrides that with 10% (`VARIANCE_REVIEW_PCT` plus `VARIANCE_REVIEW_PCT_BY_CATEGORY`, read through `variance_threshold(category)`). A result with no single category uses the 15% default. Each finding records the threshold and category it was checked against.
   - Any status other than `completed`, or any threshold finding, makes the job `needs_review`.
-  - Each step is audited under the job's correlation ID: `route`, `dispatch`, `threshold_check` and `compose_briefing`.
+  - Each step is audited under the job's correlation ID: `route`, `dispatch`, `threshold_check`, `review` (only with a checkpointer) and `compose_briefing`.
+- **Review interrupt (design §5.3), only with a checkpointer.** `Supervisor.run(request, checkpointer=...)` compiles the graph with the given saver (`InMemorySaver` or `SqliteSaver`, thread ID = correlation ID) and adds a `review` node after the threshold check. When there are findings or any result isn't `completed`, the job stops at `interrupt()` with status `awaiting_review` and a payload listing the findings and the unfinished results. `Supervisor.resume(correlation_id, {"reviewer", "accepted", "note"}, checkpointer=...)` continues it, also from a new process when the saver is SQLite. The reviewer must be a household admin or adult member of the same household (the same `APPROVER_ROLES` as approvals) **and**, through the `Authorizer`, allowed `resume` for the job's purpose on every account the results used. Anyone else (a dependent, a delegate, an unknown ID, or Jordan when the job read Alex's private account) is audited as a `review` deny and the job keeps waiting. An allowed decision is audited as `review` allow and ends the job `reviewed` or `review_rejected`; the decision is shown in the briefing. Specialists aren't run again on resume, and the node does nothing before `interrupt()`, so re-running it is safe. With no checkpointer the graph has no `review` node and behaves exactly as before, which is why the offline vertical slice and its audit-stage check don't include `review`.
+  - **Not built yet:** pending reviews don't expire (the design's 7-day default), consent is re-checked for the reviewer only, not re-run for the original requester, tool calls have no idempotency keys (nothing re-executes today because finished nodes aren't re-run), the decision doesn't change the briefing's content beyond recording it, and the vertical slice still runs the Supervisor without a checkpointer.
 - **Model binding.** `bind_tools` is used when the model supports it; otherwise the plain model is used (fake models in tests).
 
 ## 4f. Monthly briefing (`briefing.py`)
@@ -392,6 +398,8 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Prompt injection in documents | Instruction-like chunks flagged at indexing and audited at retrieval; text treated as data | `retrieval.py` |
 | Index tampering | Per-chunk hash re-checked at retrieval → `hash_mismatch` | `retrieval.py` |
 | Model asserts unsupported numbers | Specialist claims re-validated; outputs copied from tools | `agents.py` |
+| A result from another job is mixed in | Correlation ID on both handoff payloads; a mismatched result is discarded as `failed` | `agents.py` |
+| A flagged job is accepted by the wrong person | `review` interrupt: admin/adult of the household with `resume` access to every account the job used; denials audited, job keeps waiting | `agents.py` |
 | Model routes to an unknown agent or plans a payment | Pydantic `Literal` allowlist, ≤ 8 dispatches, external-action flag can't be cleared by the model | `agents.py` |
 | Runaway agent loops | Per-assignment tool/retry/refinement budgets, job dispatch and time limits, LangGraph recursion limit | `agents.py` |
 | Briefing shows unverified numbers | Totals and balances from verified data only; provisional items labeled and excluded; amounts must cite evidence | `briefing.py` |
@@ -413,7 +421,7 @@ Done so far: model configuration (`llm.py`), persistent consent (`consent.py`), 
 - **Budgets.**
   - Supervisor: 8 dispatches per job and a 5-minute job limit.
   - Specialists: 6 tool calls each, with 2 retries per tool.
-- **Durability.** A SQLite checkpointer, plus `interrupt()` for human approval.
+- **Durability.** A SQLite checkpointer, plus `interrupt()` for human approval. **Done** for allocation approval (`approval.py`) and for Supervisor review of findings and incomplete results (`Supervisor.run(..., checkpointer=...)`, `Supervisor.resume`).
 - **Retrieval.** A ChromaDB index of verified documents, using 500/100 chunking and `nomic-embed-text`. Every retrieval is filtered by the authorizer.
 - **MCP.** A `household-finance-tools` stdio MCP server exposes the Phase 1 functions, consumed through `langchain-mcp-adapters`.
 - **Models.** Local Ollama models: `qwen2.5:7b` as the baseline, with `qwen3:8b` for comparison. Hosted models for evals on synthetic data when no local model is available: Gemini (`gemini-2.5-flash`, `gemini-embedding-001`) or Groq (`qwen/qwen3-32b`).

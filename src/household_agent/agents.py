@@ -17,6 +17,13 @@ What the model is *not* trusted with:
   6 tool calls and 2 retries per tool; Policy & Compliance gets 2 query refinements.
 - **The briefing.** ``compose_briefing`` is deterministic and uses only validated claims,
   so the Supervisor cannot assert a fact that no specialist supported.
+- **Handoffs.** Both payloads carry the job's correlation ID; a result whose ID does not match
+  its assignment is discarded and becomes a ``failed`` dispatch.
+
+With a checkpointer (``run(..., checkpointer=...)``) the graph gains a ``review`` node: a
+threshold finding or any result that is not ``completed`` pauses the job with ``interrupt()``
+until an authorized household member resolves it (``Supervisor.resume``). Without one the
+job runs straight through to the briefing, as before.
 """
 
 import json
@@ -32,13 +39,15 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field, ValidationError
+from langgraph.types import Command, interrupt
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from household_agent.approval import start_request
+from household_agent.approval import APPROVER_ROLES, start_request
 from household_agent.audit import AuditLog
-from household_agent.authz import Actor
+from household_agent.authz import Actor, Authorizer
 from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
+from household_agent.models import Action
 from household_agent.retrieval import COLLECTIONS, Claim, RetrievalRequestError, RetrievalService, validate_claims
 from household_agent.tools import ToolSession
 from household_finance.money import format_minor
@@ -51,7 +60,9 @@ Status = Literal["completed", "needs_review", "failed", "budget_exhausted"]
 MAX_DISPATCHES = 8
 JOB_SECONDS = 300
 MAX_QUERY_REFINEMENTS = 2
-VARIANCE_REVIEW_PCT = Decimal("10")  # design §5.3 property-tax threshold
+VARIANCE_REVIEW_PCT = Decimal("15")  # design §5.4 default for any category or bill
+VARIANCE_REVIEW_PCT_BY_CATEGORY: dict[str, Decimal] = {"property_tax": Decimal("10")}  # §5.4 per-category override
+REVIEW_WORKFLOW = "supervisor_review"
 PURPOSE_FOR_INTENT: dict[str, str] = {
     "historical_comparison": "historical_comparison",
     "historical_comparison_and_tax_context": "historical_comparison",
@@ -69,6 +80,8 @@ class Budget(BaseModel):
 
 
 class TaskAssignment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     task_id: str
     correlation_id: str
     assigned_agent: AgentName
@@ -87,7 +100,10 @@ class ResultClaim(BaseModel):
 
 
 class AgentResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     task_id: str
+    correlation_id: str  # copied from the assignment; the Supervisor rejects a mismatch
     agent: AgentName
     status: Status
     outputs: dict[str, Any] = Field(default_factory=dict)
@@ -130,12 +146,14 @@ ROUTER_PROMPT = (
 )
 LEDGER_PROMPT = (
     "You are the Ledger Analyst. Use query_ledger to find transactions and run_calculation for every "
-    "number; never do arithmetic yourself. Do not interpret tax or policy treatment. Your tool budget is "
-    "small (tool_budget in the task): filter query_ledger by merchant and by the months the task names "
-    "(a month or 'last year' without a year is relative to today in the task) rather than widening the "
-    "date range and repeating it, then pass the transaction IDs you found to run_calculation. Call "
-    "list_accounts only if the task names no account. A claim with a computed number (a difference, "
-    "percentage or total) must cite the run_id from run_calculation, not just the transactions. " + _JSON_RULE
+    "number; never do arithmetic yourself. Use ingest_statement only to load a CSV statement the task "
+    "supplies; to read transactions always prefer query_ledger. Do not interpret tax or policy "
+    "treatment. Your tool budget is small (tool_budget in the task): filter query_ledger by merchant and "
+    "by the months the task names (a month or 'last year' without a year is relative to today in the "
+    "task) rather than widening the date range and repeating it, then pass the transaction IDs you found "
+    "to run_calculation. Call list_accounts only if the task names no account. A claim with a computed "
+    "number (a difference, percentage or total) must cite the run_id from run_calculation, not just the "
+    "transactions. " + _JSON_RULE
 )
 POLICY_PROMPT = (
     "You are the Policy & Compliance agent. Use retrieve_verified to find sources and cite chunk IDs. "
@@ -159,6 +177,8 @@ LEDGER_TOOLS = [
         {"account_ids": _STR_LIST, "start": {"type": "string"}, "end": {"type": "string"},
          "merchant": {"type": "string"}, "include_provisional": {"type": "boolean"}},
         ["account_ids", "start", "end"]),
+    _fn("ingest_statement", "Parse, reconcile and store a CSV statement supplied in the task (needs upload rights).",
+        {"csv_text": {"type": "string"}, "source_name": {"type": "string"}}, ["csv_text", "source_name"]),
     _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions, recurring_drift or cluster_risk.",
         {"fn": {"type": "string"}, "transaction_ids": _STR_LIST, "params": {"type": "object"},
          "allow_provisional": {"type": "boolean"}}, ["fn", "transaction_ids"]),
@@ -306,9 +326,13 @@ class LedgerAnalyst:
                 evidence.update({t["transaction_id"]: _with_money(t) for t in r["transactions"]})
             elif o["tool"] == "run_calculation":
                 # a run's inputs are its provenance, so "October 2025" in a claim citing it is supported
-                evidence[r["run_id"]] = {**_with_money(r["output"]),
-                                         "inputs": [evidence[i] for i in r["input_ids"] if i in evidence]}
-                outputs = {**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"]}
+                inputs = [evidence[i] for i in r["input_ids"] if i in evidence]
+                evidence[r["run_id"]] = {**_with_money(r["output"]), "inputs": inputs}
+                # category picks the review threshold; account_ids scope who may resolve a review
+                categories = {t["category"] for t in inputs}
+                outputs = {**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"],
+                           "account_ids": sorted({t["account_id"] for t in inputs}),
+                           **({"category": categories.pop()} if len(categories) == 1 else {})}
         claims, parse_error = parse_final(loop)
         verdicts = validate_claims([Claim(c.text, "calculated", calc_run_ids=tuple(c.evidence_ids)) for c in claims],
                                    [], evidence)
@@ -316,8 +340,9 @@ class LedgerAnalyst:
         removed = [f"claim removed: {v['reason']}" for v in verdicts if v["verdict"] != "supported"]
         errors = _errors(loop) + removed + ([parse_error] if parse_error else [])
         status = _status(loop, parse_error, bool(removed))
-        return AgentResult(task_id=a.task_id, agent=self.name, status=status, outputs=outputs,
-                           evidence_ids=list(evidence), claims=[c.model_copy(update={"kind": "calculated"}) for c in kept],
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=self.name, status=status,
+                           outputs=outputs, evidence_ids=list(evidence),
+                           claims=[c.model_copy(update={"kind": "calculated"}) for c in kept],
                            needs_review=status != "completed", errors=errors)
 
 
@@ -371,7 +396,7 @@ class PolicyCompliance:
                 removed.append(f"claim removed: {v['reason']}")
         errors = _errors(loop) + removed + ([parse_error] if parse_error else [])
         status = _status(loop, parse_error, bool(questions or removed))
-        return AgentResult(task_id=a.task_id, agent=self.name, status=status,
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=self.name, status=status,
                            evidence_ids=sorted({i for c in kept for i in c.evidence_ids}), claims=kept,
                            questions=list(dict.fromkeys(questions)), needs_review=status != "completed",
                            errors=errors)
@@ -426,6 +451,8 @@ class JobState(TypedDict, total=False):
     dispatches: int
     findings: list[dict[str, Any]]
     approval_thread_id: str
+    review: dict[str, Any]
+    review_denied_attempts: int
     status: str
     briefing: dict[str, Any]
 
@@ -435,6 +462,15 @@ def _pct(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def variance_threshold(category: str | None) -> Decimal:
+    """Review threshold for a variance in ``category`` (design §5.4: 15% default, overrides per category)."""
+    return VARIANCE_REVIEW_PCT_BY_CATEGORY.get(category or "", VARIANCE_REVIEW_PCT)
+
+
+def _needs_review(state: JobState) -> bool:
+    return bool(state.get("findings")) or any(r["status"] != "completed" for r in state.get("results", []))
 
 
 def compose_briefing(state: JobState) -> dict[str, Any]:
@@ -449,6 +485,7 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
         "needs_review": any(r.status != "completed" for r in results) or bool(state.get("findings")),
         "external_action": "none: the system only drafts; it never moves money",
         "approval_thread_id": state.get("approval_thread_id"),
+        "review": state.get("review"),
     }
 
 
@@ -462,14 +499,39 @@ class Supervisor:
     approval_graph: Any = None
     max_dispatches: int = MAX_DISPATCHES
     job_seconds: int = JOB_SECONDS
+    members: Mapping[str, Actor] = field(default_factory=dict)  # who may resolve a review
+    authorizer: Authorizer | None = None  # re-checks the reviewer's access to the job's accounts
 
-    def _audit(self, state: JobState, action: str, decision: str, reason: str, **details: Any) -> None:
-        self.audit.append(correlation_id=state["correlation_id"], actor_id=self.actor.member_id,
+    def _audit(self, state: JobState, action: str, decision: str, reason: str, *, actor_id: str | None = None,
+               **details: Any) -> None:
+        self.audit.append(correlation_id=state["correlation_id"], actor_id=actor_id or self.actor.member_id,
                           household_id=self.actor.household_id, acting_agent="supervisor", action=action,
                           purpose=PURPOSE_FOR_INTENT.get(state.get("routing", {}).get("intent", ""), None),
                           decision=decision, reason=reason, details=details, at=self.clock())
 
+    def _reviewer_denial(self, reviewer_id: str, state: JobState) -> str | None:
+        """Why ``reviewer_id`` may not resolve this review, or ``None`` if they may.
+
+        Like an approval: an admin or adult member of the job's household, who must also be
+        authorized (``resume``, for the job's purpose) on every account the job's results used.
+        """
+        reviewer = self.members.get(reviewer_id)
+        if reviewer is None or reviewer.household_id != self.actor.household_id:
+            return "reviewer is not a member of this household"
+        if reviewer.role not in APPROVER_ROLES:
+            return f"{reviewer.role.value} may not resolve reviews"
+        accounts = sorted({a for r in state["results"] for a in r["outputs"].get("account_ids", [])})
+        if accounts and self.authorizer is None:
+            return "no authorizer to re-check account access"
+        purpose = PURPOSE_FOR_INTENT[state["routing"]["intent"]]
+        for account_id in accounts:
+            decision = self.authorizer.authorize(reviewer, account_id, Action.RESUME, purpose, self.clock())
+            if not decision:
+                return f"{account_id}: {decision.reason}"
+        return None
+
     def build(self, checkpointer: Any = None):
+        """Compile the job graph; the ``review`` interrupt exists only when a checkpointer is given."""
         def classify(state: JobState) -> JobState:
             decision, source = self.router(state["request"])
             routing = decision.model_dump()
@@ -502,8 +564,8 @@ class Supervisor:
             elapsed = (self.clock() - datetime.fromisoformat(state["started_at"])).total_seconds()
             if state["dispatches"] >= self.max_dispatches or elapsed > self.job_seconds:
                 reason = "dispatch budget exhausted" if state["dispatches"] >= self.max_dispatches else "job time limit"
-                result = AgentResult(task_id=task_id, agent=item.agent, status="budget_exhausted",
-                                     needs_review=True, errors=[reason])
+                result = AgentResult(task_id=task_id, correlation_id=state["correlation_id"], agent=item.agent,
+                                     status="budget_exhausted", needs_review=True, errors=[reason])
                 self._audit(state, "dispatch", "deny", reason, agent=item.agent)
                 return {"results": [*results, result.model_dump()]}
             calc_outputs = {r["outputs"]["calc_run_id"]: {k: v for k, v in r["outputs"].items() if k != "calc_run_id"}
@@ -519,8 +581,13 @@ class Supervisor:
                     raise LookupError(f"no specialist registered for {item.agent}")
                 result = specialist(assignment)
             except Exception as exc:  # noqa: BLE001  a crashing specialist becomes a routed failure
-                result = AgentResult(task_id=task_id, agent=item.agent, status="failed", needs_review=True,
-                                     errors=[f"{type(exc).__name__}: {exc}"])
+                result = AgentResult(task_id=task_id, correlation_id=assignment.correlation_id, agent=item.agent,
+                                     status="failed", needs_review=True, errors=[f"{type(exc).__name__}: {exc}"])
+            if result.correlation_id != assignment.correlation_id:  # not this job's result: use none of it
+                result = AgentResult(task_id=task_id, correlation_id=assignment.correlation_id, agent=item.agent,
+                                     status="failed", needs_review=True,
+                                     errors=[f"correlation_id mismatch: got {result.correlation_id!r}, "
+                                             f"expected {assignment.correlation_id!r}; result discarded"])
             self._audit(state, "dispatch", "info", result.status, agent=item.agent, task_id=task_id,
                         evidence_ids=result.evidence_ids, errors=result.errors)
             return {"results": [*results, result.model_dump()], "dispatches": state["dispatches"] + 1}
@@ -531,13 +598,41 @@ class Supervisor:
         def threshold(state: JobState) -> JobState:
             findings = []
             for r in state["results"]:
-                pct = _pct(r["outputs"].get("pct_variance"))
-                if pct is not None and abs(pct) > VARIANCE_REVIEW_PCT:
-                    findings.append({"type": "material_variance", "pct_variance": str(pct),
-                                     "threshold_pct": str(VARIANCE_REVIEW_PCT), "calc_run_id": r["outputs"]["calc_run_id"]})
+                pct, category = _pct(r["outputs"].get("pct_variance")), r["outputs"].get("category")
+                limit = variance_threshold(category)
+                if pct is not None and abs(pct) > limit:
+                    findings.append({"type": "material_variance", "pct_variance": str(pct), "threshold_pct": str(limit),
+                                     "category": category, "calc_run_id": r["outputs"]["calc_run_id"]})
             if findings:
                 self._audit(state, "threshold_check", "info", "material variance", findings=findings)
+            if checkpointer is not None and _needs_review({**state, "findings": findings}):
+                return {"findings": findings, "status": "awaiting_review"}
             return {"findings": findings}
+
+        def after_threshold(state: JobState) -> str:
+            return "review" if checkpointer is not None and _needs_review(state) else "compose"
+
+        def review(state: JobState) -> JobState:
+            # Nothing before interrupt() has side effects: on resume this node runs again from the top.
+            open_results = [{k: r[k] for k in ("task_id", "agent", "status", "errors", "questions")}
+                            for r in state["results"] if r["status"] != "completed"]
+            answer = interrupt({"kind": REVIEW_WORKFLOW, "correlation_id": state["correlation_id"],
+                                "findings": state["findings"], "results": open_results})
+            answer = answer if isinstance(answer, Mapping) else {}
+            reviewer_id = str(answer.get("reviewer", ""))
+            denial = self._reviewer_denial(reviewer_id, state)
+            if denial:  # audited; the job keeps waiting for someone who may decide
+                self._audit(state, "review", "deny", denial, actor_id=reviewer_id or "unknown")
+                return {"review_denied_attempts": state.get("review_denied_attempts", 0) + 1}
+            decision = {"reviewer": reviewer_id, "accepted": answer.get("accepted") is True,
+                        "note": str(answer.get("note", ""))}
+            status = "reviewed" if decision["accepted"] else "review_rejected"
+            self._audit(state, "review", "allow", status, actor_id=reviewer_id, note=decision["note"],
+                        findings=len(state["findings"]), open_results=[r["task_id"] for r in open_results])
+            return {"review": decision, "status": status}
+
+        def after_review(state: JobState) -> str:
+            return "compose" if state.get("review") else "review"
 
         def compose(state: JobState) -> JobState:
             briefing = compose_briefing(state)
@@ -549,17 +644,33 @@ class Supervisor:
         for name, fn in [("classify", classify), ("refuse", refuse), ("plan", plan), ("dispatch", dispatch),
                          ("threshold", threshold), ("compose", compose)]:
             g.add_node(name, fn)
+        if checkpointer is not None:
+            g.add_node("review", review)
+            g.add_conditional_edges("threshold", after_threshold, ["review", "compose"])
+            g.add_conditional_edges("review", after_review, ["review", "compose"])
+        else:
+            g.add_edge("threshold", "compose")
         g.add_edge(START, "classify")
         g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "dispatch", "compose"])
         g.add_conditional_edges("dispatch", after_dispatch, ["dispatch", "threshold"])
-        g.add_edge("threshold", "compose")
         g.add_edge("refuse", "compose")
         g.add_edge("plan", "compose")
         g.add_edge("compose", END)
         return g.compile(checkpointer=checkpointer)
 
-    def run(self, request: str, *, correlation_id: str | None = None) -> JobState:
-        graph = self.build()
+    def run(self, request: str, *, correlation_id: str | None = None, checkpointer: Any = None) -> JobState:
+        """Run one job. With a checkpointer (thread ID = correlation ID) it may stop at ``review``:
+        the result then has ``status == "awaiting_review"`` and an ``__interrupt__`` payload."""
+        graph = self.build(checkpointer)
         cid = correlation_id or f"job_{uuid.uuid4().hex[:12]}"
-        return graph.invoke({"correlation_id": cid, "request": request, "started_at": self.clock().isoformat()},
-                            {"recursion_limit": 3 * self.max_dispatches + 10})
+        config: dict[str, Any] = {"recursion_limit": 3 * self.max_dispatches + 10}
+        if checkpointer is not None:
+            config["configurable"] = {"thread_id": cid}
+        return graph.invoke({"correlation_id": cid, "request": request, "started_at": self.clock().isoformat()}, config)
+
+    def resume(self, correlation_id: str, decision: Mapping[str, Any], *, checkpointer: Any) -> JobState:
+        """Resume a job paused at ``review`` with ``{"reviewer", "accepted", "note"}``; works from a new process
+        if the checkpointer is persistent (``SqliteSaver``)."""
+        return self.build(checkpointer).invoke(
+            Command(resume=dict(decision)),
+            {"configurable": {"thread_id": correlation_id}, "recursion_limit": 3 * self.max_dispatches + 10})
