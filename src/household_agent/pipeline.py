@@ -6,7 +6,7 @@ from pathlib import Path
 
 from household_agent.authz import Actor
 from household_agent.categorize import Categorizer
-from household_agent.ingest import parse_statement_csv
+from household_agent.ingest import parse_statement
 from household_agent.ledger import LedgerStore
 from household_agent.models import ReconciliationStatus
 from household_agent.reconcile import ReconciliationIssue, reconcile
@@ -32,8 +32,9 @@ def ingest_statement(
     purpose: str,
     correlation_id: str,
     at: datetime | None = None,
+    allow_pdf: bool = True,
 ) -> IngestResult:
-    parsed = parse_statement_csv(content, source_name)
+    parsed = parse_statement(content, source_name, allow_pdf=allow_pdf)
     categorized = [categorizer.categorize(r.description) for r in parsed.rows]
     recon = reconcile(
         parsed,

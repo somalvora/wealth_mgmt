@@ -148,7 +148,8 @@ class ToolSession:
     def ingest_statement(self, csv_text: str, source_name: str) -> dict[str, Any]:
         def run() -> dict[str, Any]:
             r = ingest_statement(self.store, self.categorizer, self.actor, csv_text.encode(), source_name,
-                                 purpose=self.purpose, correlation_id=self.correlation_id, at=self.clock())
+                                 purpose=self.purpose, correlation_id=self.correlation_id, at=self.clock(),
+                                 allow_pdf=False)  # the agent tool is CSV text only
             return {"document_id": r.document_id, "status": r.status.value,
                     "document_confidence": r.document_confidence, "unverified": r.unverified,
                     "issues": [{"code": i.code, "severity": i.severity, "message": i.message} for i in r.issues]}
