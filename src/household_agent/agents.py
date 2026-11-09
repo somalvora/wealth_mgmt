@@ -33,6 +33,11 @@ job runs straight through to the briefing, as before.
 "Actions for Approval". With a checkpointer the job then pauses (``reminder_approval``) until an authorized adult or
 admin approves or rejects it; approval writes a local ``.ics`` file under ``reminder_dir``. No calendar is connected
 and nothing is sent anywhere (see ``reminders.py``). Money movement is still refused.
+
+``evaluate_allocation_candidates`` is also Supervisor-only. When the host gives the Supervisor ``allocation_facts`` and a
+``ledger`` and the request is an allocation question ("where should our extra $2,000 go?"), the ``allocate`` node
+evaluates candidate plans in code (``allocation.py``) and the briefing's ``allocation`` section and statements cite that
+run. Without them the older ``plan`` path (the approval graph) is used, as before. See ``allocation_advice.py``.
 """
 
 import contextvars
@@ -58,6 +63,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from household_agent.allocation_advice import advise
+from household_agent.allocation_tool import AllocationFacts, access_denial as allocation_access_denial
+from household_agent.allocation_tool import evaluate_allocation_candidates, resolve_state
 from household_agent.approval import APPROVER_ROLES, start_request
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor, Authorizer
@@ -522,21 +530,25 @@ _PAY = re.compile(r"\bpay\b", re.I)
 _PAY_AS_REMINDER_TOPIC = re.compile(r"\b(?:to|about|for)\s+pay(?:ing)?\b", re.I)
 _REMINDER = re.compile(r"\b(remind me|set (?:up )?(?:a |an )?reminder|calendar reminder|add\b.{0,120}?\bto (?:my|the|our) calendar)",
                        re.I)
-_PLANNING = re.compile(r"\b(allocate|surplus|where should .* money|invest|capital allocation)\b", re.I)
+_PLANNING = re.compile(r"\b(allocate|surplus|where should .*(?:money|\$\s?\d)|extra (?:money|cash|\$)|invest|capital allocation)\b",
+                       re.I)
+_PAY_DOWN = re.compile(r"\bpay(?:ing)?\s+(?:down|off)\b", re.I)  # "pay down the mortgage" is a choice, not a payment
 _LEDGER = re.compile(r"\b(unusual|compare|compared|last year|higher|lower|variance|spent|spend|paid)\b", re.I)
 _POLICY = re.compile(r"\b(tax|deduct\w*|accounted for|lease|rule|policy|compliance)\b", re.I)
 
 
 def rule_route(request: str) -> RoutingDecision:
     """Keyword fallback router; also the safe default when the model's routing is invalid."""
-    if _PLANNING.search(request):
-        return RoutingDecision(intent="allocation_planning", approval_required=True)
+    planning = bool(_PLANNING.search(request))
     reminder = bool(_REMINDER.search(request))
     # "remind me to pay X" is a reminder (the payment is its topic). Any other money movement is refused, with or
     # without a reminder phrase: "remind me about the renewal and pay the invoice now" is refused.
-    bare_pay = _PAY.search(_PAY_AS_REMINDER_TOPIC.sub(" ", request) if reminder else request)
+    pay_text = _PAY_AS_REMINDER_TOPIC.sub(" ", request) if reminder else request
+    bare_pay = _PAY.search(_PAY_DOWN.sub(" ", pay_text) if planning else pay_text)
     external = bool(_MOVE_MONEY.search(request) or bare_pay) \
         and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
+    if planning:  # an allocation question is advice only; "...and transfer it" is still refused
+        return RoutingDecision(intent="allocation_planning", approval_required=True, external_action_requested=external)
     ledger, policy = bool(_LEDGER.search(request)), bool(_POLICY.search(request))
     plan = ([DispatchItem(agent="ledger_analyst", task=request)] if ledger else []) + \
            ([DispatchItem(agent="policy_compliance", task=request)] if policy else [])
@@ -591,6 +603,7 @@ class JobState(TypedDict, total=False):
     reminder_error: str
     reminder_denied_attempts: int
     reminder_file: str
+    allocation: dict[str, Any]
     status: str
     briefing: dict[str, Any]
 
@@ -648,15 +661,20 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
         "kind": "reminder", "reminder": reminder,
         "text": (f"Reminder \"{reminder['title']}\" due {reminder['due_date']} is {reminder['status']}. Approving it only "
                  "writes a local .ics file; no calendar is connected and nothing is sent.")}]
+    alloc = state.get("allocation") or {}
     return {
         "intent": state["routing"]["intent"],
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
-                       for r in results for c in r.claims if not flagged.intersection(c.evidence_ids)],
+                       for r in results for c in r.claims if not flagged.intersection(c.evidence_ids)]
+                      + list(alloc.get("statements", [])),
         "alerts": alerts,
-        "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else []),
+        "allocation": alloc or None,
+        "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else [])
+                     + list(alloc.get("questions", [])) + list(alloc.get("flags", [])),
         "actions_for_approval": actions,
         "findings": state.get("findings", []),
-        "needs_review": any(r.status != "completed" for r in results) or bool(state.get("findings")),
+        "needs_review": any(r.status != "completed" for r in results) or bool(state.get("findings"))
+                        or bool(alloc.get("needs_review")),
         "external_action": "none: the system only drafts; it never moves money",
         "approval_thread_id": state.get("approval_thread_id"),
         "review": state.get("review"),
@@ -701,6 +719,9 @@ class Supervisor:
     members: Mapping[str, Actor] = field(default_factory=dict)  # who may resolve a review
     authorizer: Authorizer | None = None  # re-checks the reviewer's access to the job's accounts
     reminder_dir: Path | None = None  # where an approved reminder's .ics is written; None = never export
+    ledger: LedgerStore | None = None  # needed (with allocation_facts) for the allocate node
+    allocation_facts: AllocationFacts | dict[str, Any] | None = None  # debts, APRs, targets: supplied by the host, never a model
+    allocation_model: BaseChatModel | None = None  # optional: proposes candidate shapes and explains the choice
 
     def _audit(self, state: JobState, action: str, decision: str, reason: str, *, actor_id: str | None = None,
                **details: Any) -> None:
@@ -824,7 +845,7 @@ class Supervisor:
             if r["external_action_requested"]:
                 return "refuse"
             if r["intent"] == "allocation_planning":
-                return "plan"
+                return "allocate" if self.ledger is not None and self.allocation_facts is not None else "plan"
             if r["dispatch_plan"]:
                 return "dispatch"
             # a reminder request with nothing to dispatch is not dropped: remind answers with an explicit open question
@@ -840,6 +861,24 @@ class Supervisor:
             thread_id, result = start_request(self.approval_graph, self.actor.household_id, self.actor.member_id)
             return {"approval_thread_id": thread_id,
                     "status": "awaiting_approval" if result.get("status") == "awaiting_approval" else result["status"]}
+
+        def allocate(state: JobState) -> JobState:
+            """Evaluate candidate plans in code (``evaluate_allocation_candidates``); decision support only."""
+            assert self.ledger is not None
+            purpose, cid, now = PURPOSE_FOR_INTENT["allocation_planning"], state["correlation_id"], self.clock()
+
+            def evaluate(**kw: Any) -> dict[str, Any]:
+                return evaluate_allocation_candidates(self.ledger, self.actor, purpose=purpose, correlation_id=cid,
+                                                      at=now, **kw)
+
+            record = advise(
+                request=state["request"], model=self.allocation_model, evaluate=evaluate,
+                access_denial=lambda: allocation_access_denial(self.actor, purpose),
+                resolve=lambda: resolve_state(self.ledger, self.actor, self.allocation_facts, correlation_id=cid, at=now))
+            self._audit(state, "allocate", "deny" if record["status"] == "denied" else "info", record["status"],
+                        run_id=record.get("run_id"), recommended=record.get("recommended"))
+            status = {"recommended": "completed", "denied": "refused"}.get(record["status"], "needs_review")
+            return {"allocation": record, "status": status}
 
         def dispatch(state: JobState) -> JobState:
             """Run the next batch of the plan: one dependent item, or a run of independent items at once."""
@@ -1034,7 +1073,7 @@ class Supervisor:
 
         g = StateGraph(JobState)
         for name, fn in [("classify", classify), ("refuse", refuse), ("plan", plan), ("dispatch", dispatch),
-                         ("threshold", threshold), ("remind", remind), ("compose", compose)]:
+                         ("threshold", threshold), ("remind", remind), ("allocate", allocate), ("compose", compose)]:
             g.add_node(name, fn)
         if checkpointer is not None:
             g.add_node("review", review)
@@ -1050,10 +1089,11 @@ class Supervisor:
             g.add_edge("threshold", "remind")
             g.add_edge("remind", "compose")
         g.add_edge(START, "classify")
-        g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "dispatch", "remind", "compose"])
+        g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "allocate", "dispatch", "remind", "compose"])
         g.add_conditional_edges("dispatch", after_dispatch, ["dispatch", "threshold"])
         g.add_edge("refuse", "compose")
         g.add_edge("plan", "compose")
+        g.add_edge("allocate", "compose")
         g.add_edge("compose", END)
         return g.compile(checkpointer=checkpointer)
 
