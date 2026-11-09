@@ -18,12 +18,14 @@ Assumptions (also returned verbatim in the output, ``assumptions``):
 - Liquid reserve after a plan = cash left after money leaves for debt, retirement and the emergency fund, plus the
   emergency fund after its contribution. Buffer months = liquid reserve / monthly essential expenses.
 - The retirement bucket is contribution/headroom accounting only. NO investment return is forecast, nothing is
-  picked, and tax effects are not modelled.
+  picked. The only tax effect is the optional flat ``tax_deferred_rate_percent`` the host gives an account:
+  tax benefit = contribution x rate, rounded half-up to the cent, counted once as a saving for the horizon. With the
+  rate at its default of 0 the benefit is 0 and the ranking is exactly the interest-only ranking.
 - A candidate that over-pays a debt is evaluated with the payment clamped to the balance (its figures stay defined)
   and is reported as invalid.
 
-Ranking (``alloc_rank_1.0``), lexicographic, lower tuple first, so it is total and stable (names are unique):
-(number of violations, emergency-fund shortfall to target, -interest saved, -retirement used,
+Ranking (``alloc_rank_1.1``), lexicographic, lower tuple first, so it is total and stable (names are unique):
+(number of violations, emergency-fund shortfall to target, -(interest saved + tax benefit), -retirement used,
 -liquid reserve after, name). Safety first (valid, emergency fund funded), then cheaper debt, then retirement room.
 The minimum cash buffer is a hard constraint, so it is covered by the first key.
 """
@@ -38,8 +40,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from household_finance.money import format_minor
 
-EVALUATOR_VERSION = "alloc_eval_1.0"
-RANKING_VERSION = "alloc_rank_1.0"
+EVALUATOR_VERSION = "alloc_eval_1.1"
+RANKING_VERSION = "alloc_rank_1.1"
 MAX_HORIZON_MONTHS = 360
 MAX_CANDIDATES = 12
 MAX_DEBTS = 20
@@ -53,7 +55,8 @@ ASSUMPTIONS: tuple[str, ...] = (
     "and never shrinks; extra principal is applied at the start of month 1; no other payments are modelled.",
     "Interest saved is measured only over the stated horizon, not over the life of the debt.",
     "The retirement bucket is contribution and headroom accounting only: no investment return is forecast, "
-    "no investments are picked, and tax effects are not modelled.",
+    "no investments are picked. The only tax effect is the flat pre-tax rate the household states for an account "
+    "(tax benefit = contribution x rate, once); there are no brackets, employer match, phase-outs or state taxes.",
     "Nothing here moves money; the household carries out any transfer itself.",
 )
 
@@ -78,6 +81,9 @@ class Debt(_Frozen):
 class RetirementAccount(_Frozen):
     account_id: str = Field(pattern=_ID)
     headroom_minor: StrictInt = Field(ge=0, le=MAX_MINOR)  # contribution room left this tax year
+    # Host-supplied, never inferred: the share of a contribution that is deducted from taxable income (0 = after-tax).
+    tax_deferred_rate_percent: Decimal = Field(default=Decimal(0), ge=0, le=100, max_digits=6, decimal_places=2,
+                                               allow_inf_nan=False)
 
 
 class HouseholdFinancialState(_Frozen):
@@ -134,6 +140,7 @@ class CandidateOutcome(_Frozen):
     allocated_minor: int
     unallocated_minor: int  # extra - allocated; negative means over-allocated
     interest_saved_minor: int
+    tax_benefit_minor: int
     debts: tuple[DebtOutcome, ...]
     liquid_reserve_after_minor: int
     buffer_months: Decimal
@@ -185,7 +192,7 @@ def _simulate(balance: int, apr_percent: Decimal, payment: int, months: int) -> 
 
 
 def _key_text(index: int) -> str:
-    return ("number of constraint violations", "emergency-fund shortfall", "interest saved",
+    return ("number of constraint violations", "emergency-fund shortfall", "interest saved plus tax benefit",
             "retirement headroom used", "liquid reserve after the plan", "name")[index]
 
 
@@ -237,6 +244,9 @@ def _evaluate_one(state: HouseholdFinancialState, extra: int, plan: CandidatePla
             bad("over_contribution_limit", f"retirement {k}: {format_minor(plan.retirement_minor[k])} is more than the "
                                            f"remaining headroom {format_minor(a.headroom_minor)}")
     headroom_total = sum(a.headroom_minor for a in state.retirement_accounts)
+    tax_benefit = sum(
+        int((Decimal(plan.retirement_minor[k]) * a.tax_deferred_rate_percent / 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        for k, a in acct_by_id.items() if plan.retirement_minor.get(k, 0) > 0)
 
     cash_after = state.liquid_cash_minor - debt_total - retirement_total - plan.emergency_fund_minor
     if cash_after < 0:
@@ -255,14 +265,14 @@ def _evaluate_one(state: HouseholdFinancialState, extra: int, plan: CandidatePla
     interest_saved = sum(o.interest_saved_minor for o in outcomes)
     return {
         "name": plan.name, "valid": not violations, "allocated_minor": allocated, "unallocated_minor": unallocated,
-        "interest_saved_minor": interest_saved, "debts": tuple(outcomes), "liquid_reserve_after_minor": reserve_after,
+        "interest_saved_minor": interest_saved, "tax_benefit_minor": tax_benefit, "debts": tuple(outcomes), "liquid_reserve_after_minor": reserve_after,
         "buffer_months": buffer_months, "buffer_meets_minimum": meets, "emergency_fund_after_minor": ef_after,
         "emergency_fund_target_minor": ef_target, "emergency_fund_pct_of_target": ef_pct,
         "emergency_fund_shortfall_minor": shortfall, "retirement_used_minor": retirement_used,
         "retirement_headroom_minor": headroom_total,
         "retirement_headroom_remaining_minor": headroom_total - retirement_used,
         "violations": tuple(violations),
-        "score_key": (len(violations), shortfall, -interest_saved, -retirement_used, -reserve_after, plan.name),
+        "score_key": (len(violations), shortfall, -(interest_saved + tax_benefit), -retirement_used, -reserve_after, plan.name),
     }
 
 
@@ -274,6 +284,8 @@ def _rationale(o: dict[str, Any], state: HouseholdFinancialState, extra: int, ra
     parts.append(f"Allocates {d(o['allocated_minor'])} of the extra {d(extra)} ({d(o['unallocated_minor'])} unallocated).")
     parts.append(f"Saves {d(o['interest_saved_minor'])} in interest over {state.horizon_months} months.")
     parts.append(f"Emergency fund {_dec(o['emergency_fund_pct_of_target'])}% of its {d(o['emergency_fund_target_minor'])} target.")
+    if o["tax_benefit_minor"]:
+        parts.append(f"Pre-tax contributions save an estimated {d(o['tax_benefit_minor'])} in tax at the stated rate.")
     parts.append(f"Uses {d(o['retirement_used_minor'])} of {d(o['retirement_headroom_minor'])} retirement headroom.")
     parts.append(f"Liquid buffer {_dec(o['buffer_months'])} months (household minimum {_dec(state.min_cash_buffer_months)}).")
     if rank == 1:
