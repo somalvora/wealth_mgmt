@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from household_agent.agents import (
     MAX_DISPATCHES,
+    MAX_QUERY_REFINEMENTS,
     AgentResult,
     Budget,
     LedgerAnalyst,
@@ -225,6 +226,13 @@ def test_policy_query_refinement_limit(retrieval):
     r = PolicyCompliance(Scripted(steps=steps), retrieval, ALEX, clock=lambda: DEMO_AS_OF)(
         assignment("policy_compliance"))
     assert any("query refinements" in e for e in r.errors)
+
+
+def test_policy_model_is_told_its_search_limit(retrieval):
+    seen = []
+    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, ALEX,
+                     clock=lambda: DEMO_AS_OF)(assignment("policy_compliance"))
+    assert f"at most {MAX_QUERY_REFINEMENTS + 1} times" in seen[0][0].content
 
 
 def test_policy_model_is_told_today_from_its_clock(retrieval):
