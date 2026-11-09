@@ -17,6 +17,8 @@ What the model is *not* trusted with:
   6 tool calls and 2 retries per tool; Policy & Compliance gets 2 query refinements.
 - **The briefing.** ``compose_briefing`` is deterministic and uses only validated claims,
   so the Supervisor cannot assert a fact that no specialist supported.
+- **Concurrency.** Items of the dispatch plan that do not need another item's output run at the same
+  time in a small thread pool (see ``_depends_on_earlier``); results and audit events still follow plan order.
 - **Handoffs.** Both payloads carry the job's correlation ID; a result whose ID does not match
   its assignment is discarded and becomes a ``failed`` dispatch.
 
@@ -26,9 +28,12 @@ until an authorized household member resolves it (``Supervisor.resume``). Withou
 job runs straight through to the briefing, as before.
 """
 
+import contextvars
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -118,6 +123,9 @@ class DispatchItem(BaseModel):
     agent: AgentName
     task: str
     inputs: dict[str, Any] = Field(default_factory=dict)
+    # Policy items only: True (default) = "give me the Ledger Analyst's calc_outputs", so the item waits for every
+    # earlier ledger item. False = the Policy task stands alone and may run beside other independent items.
+    depends_on_ledger: bool = True
 
 
 class RoutingDecision(BaseModel):
@@ -489,6 +497,26 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     }
 
 
+def _depends_on_earlier(plan: list[DispatchItem], i: int) -> bool:
+    """The dependency rule. A Policy item waits for the Ledger Analyst, because it is handed the Ledger's
+    ``calc_outputs`` to check its claims against, when an earlier plan item is a ledger item and the Policy item
+    has not set ``depends_on_ledger=False``. Every other item is independent."""
+    item = plan[i]
+    return (item.agent == "policy_compliance" and item.depends_on_ledger
+            and any(p.agent == "ledger_analyst" for p in plan[:i]))
+
+
+def _batch_end(plan: list[DispatchItem], start: int) -> int:
+    """Exclusive end of the batch starting at ``start``: a dependent item runs alone; otherwise the batch
+    extends over the following independent items, up to (not including) the next dependent one."""
+    if _depends_on_earlier(plan, start):
+        return start + 1
+    end = start + 1
+    while end < len(plan) and not _depends_on_earlier(plan, end):
+        end += 1
+    return end
+
+
 @dataclass
 class Supervisor:
     actor: Actor
@@ -530,6 +558,50 @@ class Supervisor:
                 return f"{account_id}: {decision.reason}"
         return None
 
+    def _run_one(self, specialist_name: str, assignment: TaskAssignment) -> AgentResult:
+        """Call one specialist; a crash or a result for another job becomes a ``failed`` result."""
+        try:
+            specialist = self.specialists.get(specialist_name)
+            if specialist is None:
+                raise LookupError(f"no specialist registered for {specialist_name}")
+            result = specialist(assignment)
+        except Exception as exc:  # noqa: BLE001  a crashing specialist becomes a routed failure
+            return AgentResult(task_id=assignment.task_id, correlation_id=assignment.correlation_id,
+                               agent=specialist_name, status="failed", needs_review=True,
+                               errors=[f"{type(exc).__name__}: {exc}"])
+        if result.correlation_id != assignment.correlation_id:  # not this job's result: use none of it
+            return AgentResult(task_id=assignment.task_id, correlation_id=assignment.correlation_id,
+                               agent=specialist_name, status="failed", needs_review=True,
+                               errors=[f"correlation_id mismatch: got {result.correlation_id!r}, "
+                                       f"expected {assignment.correlation_id!r}; result discarded"])
+        return result
+
+    def _run_batch(self, assignments: list[TaskAssignment], seconds: float) -> dict[str, AgentResult]:
+        """Run assignments; one runs inline, several run concurrently. Keyed by task ID. Never raises.
+
+        Only this method touches threads. A specialist that has not finished within the job's remaining
+        ``seconds`` becomes a ``failed`` result (its thread cannot be killed and is left to finish; it is not waited for).
+        """
+        if len(assignments) <= 1:
+            return {a.task_id: self._run_one(a.assigned_agent, a) for a in assignments}
+        pool = ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="specialist")
+        try:
+            futures = {a.task_id: pool.submit(contextvars.copy_context().run, self._run_one, a.assigned_agent, a)
+                       for a in assignments}
+            deadline = datetime.now(UTC).timestamp() + seconds
+            out: dict[str, AgentResult] = {}
+            for a in assignments:
+                try:
+                    out[a.task_id] = futures[a.task_id].result(
+                        timeout=max(deadline - datetime.now(UTC).timestamp(), 0.001))
+                except FutureTimeout:
+                    out[a.task_id] = AgentResult(
+                        task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent, status="failed",
+                        needs_review=True, errors=["TimeoutError: specialist did not finish within the job time limit"])
+            return out
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
     def build(self, checkpointer: Any = None):
         """Compile the job graph; the ``review`` interrupt exists only when a checkpointer is given."""
         def classify(state: JobState) -> JobState:
@@ -558,39 +630,44 @@ class Supervisor:
                     "status": "awaiting_approval" if result.get("status") == "awaiting_approval" else result["status"]}
 
         def dispatch(state: JobState) -> JobState:
+            """Run the next batch of the plan: one dependent item, or a run of independent items at once."""
             routing, results = state["routing"], list(state["results"])
-            item = DispatchItem.model_validate(routing["dispatch_plan"][len(results)])
-            task_id = f"task_{uuid.uuid4().hex[:8]}"
+            plan_items = [DispatchItem.model_validate(i) for i in routing["dispatch_plan"]]
+            first = len(results)
+            batch = plan_items[first:_batch_end(plan_items, first)]
             elapsed = (self.clock() - datetime.fromisoformat(state["started_at"])).total_seconds()
-            if state["dispatches"] >= self.max_dispatches or elapsed > self.job_seconds:
-                reason = "dispatch budget exhausted" if state["dispatches"] >= self.max_dispatches else "job time limit"
-                result = AgentResult(task_id=task_id, correlation_id=state["correlation_id"], agent=item.agent,
-                                     status="budget_exhausted", needs_review=True, errors=[reason])
-                self._audit(state, "dispatch", "deny", reason, agent=item.agent)
-                return {"results": [*results, result.model_dump()]}
+            out_of_time = elapsed > self.job_seconds
+            slots = max(self.max_dispatches - state["dispatches"], 0)
             calc_outputs = {r["outputs"]["calc_run_id"]: {k: v for k, v in r["outputs"].items() if k != "calc_run_id"}
                             for r in results if r["outputs"].get("calc_run_id")}
-            inputs = {**item.inputs, **({"calc_outputs": calc_outputs} if item.agent == "policy_compliance" else {})}
-            assignment = TaskAssignment(
-                task_id=task_id, correlation_id=state["correlation_id"], assigned_agent=item.agent,
-                purpose=PURPOSE_FOR_INTENT[routing["intent"]], task=item.task, inputs=inputs,
-                authorized_scope={"household_id": self.actor.household_id, "requester": self.actor.member_id})
-            specialist = self.specialists.get(item.agent)
-            try:
-                if specialist is None:
-                    raise LookupError(f"no specialist registered for {item.agent}")
-                result = specialist(assignment)
-            except Exception as exc:  # noqa: BLE001  a crashing specialist becomes a routed failure
-                result = AgentResult(task_id=task_id, correlation_id=assignment.correlation_id, agent=item.agent,
-                                     status="failed", needs_review=True, errors=[f"{type(exc).__name__}: {exc}"])
-            if result.correlation_id != assignment.correlation_id:  # not this job's result: use none of it
-                result = AgentResult(task_id=task_id, correlation_id=assignment.correlation_id, agent=item.agent,
-                                     status="failed", needs_review=True,
-                                     errors=[f"correlation_id mismatch: got {result.correlation_id!r}, "
-                                             f"expected {assignment.correlation_id!r}; result discarded"])
-            self._audit(state, "dispatch", "info", result.status, agent=item.agent, task_id=task_id,
-                        evidence_ids=result.evidence_ids, errors=result.errors)
-            return {"results": [*results, result.model_dump()], "dispatches": state["dispatches"] + 1}
+            # Plan order decides who gets the remaining budget; denied items are always a suffix of the batch.
+            jobs: list[tuple[DispatchItem, str, str | None, TaskAssignment | None]] = []
+            for n, item in enumerate(batch):
+                task_id = f"task_{uuid.uuid4().hex[:8]}"
+                if out_of_time or n >= slots:
+                    reason = "job time limit" if out_of_time else "dispatch budget exhausted"
+                    jobs.append((item, task_id, reason, None))
+                    continue
+                inputs = {**item.inputs, **({"calc_outputs": calc_outputs}
+                                            if item.agent == "policy_compliance" and item.depends_on_ledger else {})}
+                jobs.append((item, task_id, None, TaskAssignment(
+                    task_id=task_id, correlation_id=state["correlation_id"], assigned_agent=item.agent,
+                    purpose=PURPOSE_FOR_INTENT[routing["intent"]], task=item.task, inputs=inputs,
+                    authorized_scope={"household_id": self.actor.household_id, "requester": self.actor.member_id})))
+            runnable = [a for _, _, _, a in jobs if a is not None]
+            finished = self._run_batch(runnable, max(self.job_seconds - elapsed, 0.001))
+            new_results: list[dict[str, Any]] = []
+            for item, task_id, denied, assignment in jobs:  # audit in plan order, whatever the completion order
+                if assignment is None:
+                    result = AgentResult(task_id=task_id, correlation_id=state["correlation_id"], agent=item.agent,
+                                         status="budget_exhausted", needs_review=True, errors=[str(denied)])
+                    self._audit(state, "dispatch", "deny", str(denied), agent=item.agent)
+                else:
+                    result = finished[assignment.task_id]
+                    self._audit(state, "dispatch", "info", result.status, agent=item.agent, task_id=task_id,
+                                evidence_ids=result.evidence_ids, errors=result.errors)
+                new_results.append(result.model_dump())
+            return {"results": [*results, *new_results], "dispatches": state["dispatches"] + len(runnable)}
 
         def after_dispatch(state: JobState) -> str:
             return "dispatch" if len(state["results"]) < len(state["routing"]["dispatch_plan"]) else "threshold"

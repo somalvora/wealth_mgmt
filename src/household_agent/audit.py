@@ -7,6 +7,7 @@ and ``verify()`` recomputes the chain so any out-of-band edit is detected.
 import hashlib
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -57,6 +58,10 @@ def _event_hash(fields: dict[str, Any], prev_hash: str) -> str:
 class AuditLog:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        # Two specialists may append from different threads: read-last-hash + insert must be one step,
+        # or two events could share a prev_hash and break the chain. (The connection itself must be
+        # opened with check_same_thread=False for cross-thread use.)
+        self._lock = threading.RLock()
         conn.executescript(_SCHEMA)
 
     def append(
@@ -92,16 +97,17 @@ class AuditLog:
             "consent_version": consent_version,
             "details_json": json.dumps(details or {}, sort_keys=True, default=str),
         }
-        row = self._conn.execute("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1").fetchone()
-        prev_hash = row[0] if row else GENESIS_HASH
-        fields["prev_hash"] = prev_hash
-        fields["hash"] = _event_hash(fields, prev_hash)
-        cols = ", ".join(fields)
-        self._conn.execute(
-            f"INSERT INTO audit_events ({cols}) VALUES ({', '.join('?' * len(fields))})",
-            tuple(fields.values()),
-        )
-        self._conn.commit()
+        with self._lock:
+            row = self._conn.execute("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1").fetchone()
+            prev_hash = row[0] if row else GENESIS_HASH
+            fields["prev_hash"] = prev_hash
+            fields["hash"] = _event_hash(fields, prev_hash)
+            cols = ", ".join(fields)
+            self._conn.execute(
+                f"INSERT INTO audit_events ({cols}) VALUES ({', '.join('?' * len(fields))})",
+                tuple(fields.values()),
+            )
+            self._conn.commit()
         return fields["event_id"]
 
     def verify(self) -> int:

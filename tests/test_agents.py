@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import threading
+import time
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -585,3 +587,207 @@ def test_ledger_ingest_of_another_members_statement_is_denied(store, categorizer
     r = _ledger(store, categorizer, steps, actor=JORDAN)(assignment(purpose="statement_ingestion"))
     assert "ingest_statement: authorization_denied" in r.errors[0]
     assert store.audit.events("job_t")[-1]["decision"] == "deny"
+
+
+# --- bounded concurrent dispatch (design §4.2) ---------------------------------------------
+
+def _plan_router(*items, intent="historical_comparison_and_tax_context"):
+    decision = RoutingDecision(intent=intent, dispatch_plan=list(items))
+    return lambda request: (decision, "test")
+
+
+def _ledger_item(task="ledger"):
+    return DispatchItem(agent="ledger_analyst", task=task)
+
+
+def _policy_item(task="policy", **kw):
+    return DispatchItem(agent="policy_compliance", task=task, **kw)
+
+
+def _dispatch_agents(audit, cid):
+    return [e["acting_agent"] and json.loads(e["details_json"]).get("agent") for e in audit.events(cid)
+            if e["action"] == "dispatch"]
+
+
+def test_independent_specialists_run_at_the_same_time(seeded_store):
+    meet = threading.Barrier(2, timeout=5)  # both must be inside their specialist at once, or this raises
+    seen = []
+
+    def specialist(a):
+        seen.append(threading.current_thread().name)
+        meet.wait()
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed", outputs={"calc_inputs": a.inputs})
+
+    router = _plan_router(_ledger_item(), _policy_item(depends_on_ledger=False))
+    out = _supervisor(seeded_store, {"ledger_analyst": specialist, "policy_compliance": specialist},
+                      router=router).run("x", correlation_id="j_par")
+    assert [r["agent"] for r in out["results"]] == ["ledger_analyst", "policy_compliance"]
+    assert [r["status"] for r in out["results"]] == ["completed", "completed"] and out["dispatches"] == 2
+    assert len(set(seen)) == 2  # two worker threads
+    assert "calc_outputs" not in out["results"][1]["outputs"]["calc_inputs"]  # independent: no Ledger hand-over
+    assert _dispatch_agents(seeded_store.audit, "j_par") == ["ledger_analyst", "policy_compliance"]
+    assert seeded_store.audit.verify() > 0
+
+
+def test_dependent_plan_stays_sequential_and_policy_gets_calc_outputs(seeded_store):
+    active, peak, inputs = [0], [0], {}
+
+    def ledger(a):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        active[0] -= 1
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent="ledger_analyst",
+                           status="completed", outputs={"calc_run_id": "calc_1", "pct_variance": "5"})
+
+    def policy(a):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        inputs.update(a.inputs)
+        active[0] -= 1
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent="policy_compliance",
+                           status="completed")
+
+    out = _supervisor(seeded_store, {"ledger_analyst": ledger, "policy_compliance": policy},
+                      router=_plan_router(_ledger_item(), _policy_item())).run("x")
+    assert peak[0] == 1 and out["dispatches"] == 2
+    assert inputs["calc_outputs"] == {"calc_1": {"pct_variance": "5"}}
+
+
+def test_a_crashing_specialist_does_not_lose_its_partner(seeded_store):
+    meet = threading.Barrier(2, timeout=5)
+
+    def crash(a):
+        meet.wait()
+        raise RuntimeError("boom")
+
+    def fine(a):
+        meet.wait()
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed", claims=[])
+
+    out = _supervisor(seeded_store, {"ledger_analyst": crash, "policy_compliance": fine},
+                      router=_plan_router(_ledger_item(), _policy_item(depends_on_ledger=False))).run("x", correlation_id="j_c")
+    assert [r["status"] for r in out["results"]] == ["failed", "completed"]
+    assert out["results"][0]["errors"] == ["RuntimeError: boom"] and out["status"] == "needs_review"
+    assert _dispatch_agents(seeded_store.audit, "j_c") == ["ledger_analyst", "policy_compliance"]
+
+
+def test_a_concurrent_result_for_another_job_is_discarded(seeded_store):
+    meet = threading.Barrier(2, timeout=5)
+
+    def impostor(a):
+        meet.wait()
+        return AgentResult(task_id=a.task_id, correlation_id="job_other", agent=a.assigned_agent, status="completed",
+                           outputs={"pct_variance": "99"})
+
+    def fine(a):
+        meet.wait()
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed")
+
+    out = _supervisor(seeded_store, {"ledger_analyst": fine, "policy_compliance": impostor},
+                      router=_plan_router(_ledger_item(), _policy_item(depends_on_ledger=False))).run("x")
+    assert out["results"][0]["status"] == "completed"
+    assert out["results"][1]["status"] == "failed" and "correlation_id mismatch" in out["results"][1]["errors"][0]
+    assert out["findings"] == []
+
+
+def test_a_specialist_that_outlives_the_job_time_limit_fails_without_losing_the_other(seeded_store):
+    release = threading.Event()
+
+    def stuck(a):
+        release.wait(10)
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed")
+
+    def fine(a):
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed")
+
+    try:
+        out = _supervisor(seeded_store, {"ledger_analyst": stuck, "policy_compliance": fine},
+                          router=_plan_router(_ledger_item(), _policy_item(depends_on_ledger=False)),
+                          job_seconds=1).run("x")
+    finally:
+        release.set()
+    assert [r["status"] for r in out["results"]] == ["failed", "completed"]
+    assert "TimeoutError" in out["results"][0]["errors"][0]
+
+
+def test_budget_is_shared_by_a_concurrent_batch_in_plan_order(seeded_store):
+    ran = []
+
+    def fine(a):
+        ran.append(a.task)
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed")
+
+    router = _plan_router(_ledger_item("a"), _ledger_item("b"), _ledger_item("c"))
+    out = _supervisor(seeded_store, {"ledger_analyst": fine}, router=router, max_dispatches=2).run("x", correlation_id="j_b")
+    assert sorted(ran) == ["a", "b"] and out["dispatches"] == 2
+    assert [r["status"] for r in out["results"]] == ["completed", "completed", "budget_exhausted"]
+    decisions = [e["decision"] for e in seeded_store.audit.events("j_b") if e["action"] == "dispatch"]
+    assert decisions == ["info", "info", "deny"]
+
+
+def test_time_limit_denies_a_whole_batch_before_it_starts(seeded_store):
+    stub = _stub()
+    clock = [DEMO_AS_OF + timedelta(seconds=400)]
+    sup = Supervisor(ALEX, _plan_router(_ledger_item(), _ledger_item()), {"ledger_analyst": stub}, seeded_store.audit,
+                     clock=lambda: clock[0])
+    state = sup.build().invoke({"correlation_id": "j_t", "request": "x", "started_at": DEMO_AS_OF.isoformat()})
+    assert stub.calls == [] and [r["errors"] for r in state["results"]] == [["job time limit"]] * 2
+
+
+def test_audit_appends_from_two_threads_keep_the_chain_valid():
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    audit = AuditLog(conn)
+
+    def write(n):
+        for i in range(25):
+            audit.append(correlation_id=f"c{n}", actor_id="alex", household_id="hh", action="x", decision="info",
+                         details={"i": i})
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert audit.verify() == 100
+
+
+@settings(max_examples=25, deadline=None)
+@given(st.permutations([0.0, 0.02, 0.04, 0.06]))
+def test_results_and_audit_follow_plan_order_for_any_completion_order(delays):
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    audit = AuditLog(conn)
+
+    def specialist(a):
+        time.sleep(delays[int(a.task)])
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
+                           status="completed", errors=[a.task])
+
+    plan = [DispatchItem(agent="ledger_analyst" if i % 2 == 0 else "policy_compliance", task=str(i),
+                         depends_on_ledger=False) for i in range(4)]
+    sup = Supervisor(ALEX, _plan_router(*plan), {"ledger_analyst": specialist, "policy_compliance": specialist}, audit,
+                     clock=lambda: DEMO_AS_OF)
+    out = sup.run("x", correlation_id="j_p")
+    assert [r["errors"] for r in out["results"]] == [["0"], ["1"], ["2"], ["3"]]
+    logged = [json.loads(e["details_json"])["errors"] for e in audit.events("j_p") if e["action"] == "dispatch"]
+    assert logged == [["0"], ["1"], ["2"], ["3"]] and audit.verify() > 0
+
+
+@pytest.mark.parametrize(("plan", "batches"), [
+    ([_ledger_item(), _policy_item()], [1, 1]),                                  # Policy waits for the Ledger
+    ([_policy_item(), _ledger_item()], [2]),                                     # Policy first: nothing to wait for
+    ([_ledger_item(), _policy_item(depends_on_ledger=False)], [2]),
+    ([_ledger_item(), _ledger_item(), _policy_item(), _policy_item()], [2, 1, 1]),
+    ([_ledger_item(), _policy_item(depends_on_ledger=False), _policy_item()], [2, 1]),
+])
+def test_dependency_rule_batches(plan, batches):
+    from household_agent.agents import _batch_end
+    sizes, i = [], 0
+    while i < len(plan):
+        end = _batch_end(plan, i)
+        sizes.append(end - i)
+        i = end
+    assert sizes == batches
