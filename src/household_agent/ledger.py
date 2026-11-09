@@ -376,6 +376,10 @@ class LedgerStore:
         at = at or datetime.now(UTC)
         for account_id in account_ids:
             self._require(actor, account_id, Action.READ, purpose, correlation_id, at)
+        return self._coverage(account_ids, start, end)
+
+    def _coverage(self, account_ids: Sequence[str], start: date, end: date) -> list[dict]:
+        """Coverage rows with no authorization or audit of its own: callers must already have checked access."""
         cur = self.conn.execute(
             f"""
             SELECT document_id, account_id, source_name, period_start, period_end, reconciliation_status,
@@ -389,6 +393,65 @@ class LedgerStore:
         cols = ("document_id", "account_id", "source_name", "period_start", "period_end", "status",
                 "document_confidence", "unverified", "issues")
         return [{**dict(zip(cols, r, strict=True)), "unverified": bool(r[7]), "issues": json.loads(r[8])} for r in cur]
+
+    @_locked
+    def left_out_documents(
+        self,
+        actor: Actor,
+        purpose: str,
+        correlation_id: str,
+        account_ids: Sequence[str],
+        start: date,
+        end: date,
+        *,
+        include_provisional: bool = False,
+        at: datetime | None = None,
+    ) -> dict:
+        """Which documents overlapping ``[start, end]`` ``query_transactions`` would not (fully) trust, so a caller
+        can say what was left out instead of returning a silently shorter list.
+
+        ``excluded`` = documents whose rows were not returned: ``unreconciled`` always; ``unverified`` and
+        ``qualified`` unless ``include_provisional``. ``unverified_included`` = unverified documents whose rows *were*
+        returned because ``include_provisional`` was set (their rows are provisional). Each entry has the document ID,
+        source name, status, issue codes, confidence and ``rows_in_range`` (latest row versions posted in the range).
+        """
+        at = at or datetime.now(UTC)
+        for account_id in account_ids:  # checked again but not re-audited: the read was audited by the query itself
+            decision = self.authorizer.authorize(actor, account_id, Action.READ, purpose, at)
+            if not decision:
+                raise AuthorizationError(decision)
+        excluded: dict[str, list[dict]] = {"unreconciled": [], "unverified": [], "qualified": []}
+        unverified_included: list[dict] = []
+        for d in self._coverage(account_ids, start, end):
+            status = d["status"]
+            is_unverified = d["unverified"] or d["document_confidence"] < CONFIDENCE_THRESHOLD
+            if status == ReconciliationStatus.UNRECONCILED.value:
+                kind = "unreconciled"
+            elif is_unverified:
+                kind = "unverified"
+            elif status == ReconciliationStatus.QUALIFIED.value:
+                kind = "qualified"
+            else:
+                continue
+            entry = {"document_id": d["document_id"], "source_name": d["source_name"], "status": kind,
+                     "issue_codes": sorted({i["code"] for i in d["issues"]}),
+                     "document_confidence": d["document_confidence"],
+                     "rows_in_range": self._rows_in_range(d["document_id"], start, end)}
+            if kind != "unreconciled" and include_provisional:
+                if kind == "unverified":
+                    unverified_included.append(entry)
+                continue  # qualified rows are returned (provisional) with include_provisional
+            excluded[kind].append(entry)
+        return {"excluded": excluded, "unverified_included": unverified_included}
+
+    def _rows_in_range(self, document_id: str, start: date, end: date) -> int:
+        return self.conn.execute(
+            """
+            SELECT COUNT(*) FROM transactions t
+            JOIN (SELECT transaction_id, MAX(version) v FROM transactions GROUP BY transaction_id) latest
+              ON latest.transaction_id = t.transaction_id AND latest.v = t.version
+            WHERE t.source_document_id = ? AND t.posted_at BETWEEN ? AND ?
+            """, (document_id, start.isoformat(), end.isoformat())).fetchone()[0]
 
     @_locked
     def document_status(self, document_id: str) -> dict:

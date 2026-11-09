@@ -11,10 +11,11 @@
 """
 
 import hashlib
+import os
 import re
 import unicodedata
 from collections.abc import Collection, Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,7 @@ ReminderStatus = Literal["draft", "approved", "rejected", "created"]
 _ALLOWED = {"draft": {"approved", "rejected"}, "approved": {"created"}, "rejected": set(), "created": set()}
 PRODID = "-//household-agent//reminders//EN"
 UID_DOMAIN = "reminder.household-agent.local"
+_REMINDER_ID = re.compile(r"rem_[0-9a-f]{16}")
 
 
 class ReminderError(ValueError):
@@ -116,20 +118,56 @@ _ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _NAMED = re.compile(r"\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b", re.I)
 
 
-def extract_due_date(text: str, today: date) -> date | None:
-    """First ISO date or "Month D[, YYYY]" in ``text``; a year-less date means the next such day."""
-    try:
-        if m := _ISO.search(text):
-            return date(int(m[1]), int(m[2]), int(m[3]))
-        if m := _NAMED.search(text):
+_LEAD = re.compile(r"\b(?:on|by|before|due(?:\s+on)?|until|for)\s+(?:the\s+)?$", re.I)
+_REMIND = re.compile(r"\bremind\w*", re.I)
+
+
+def _mentions(text: str, today: date) -> list[tuple[int, date]]:
+    """Every valid date in ``text`` as (start offset, date), in order. A year-less date means the next such day."""
+    found: list[tuple[int, date]] = []
+    for m in _ISO.finditer(text):
+        try:
+            found.append((m.start(), date(int(m[1]), int(m[2]), int(m[3]))))
+        except ValueError:
+            pass
+    for m in _NAMED.finditer(text):
+        try:
             month, day = _MONTHS[m[1].lower()], int(m[2])
             if m[3]:
-                return date(int(m[3]), month, day)
-            d = date(today.year, month, day)
-            return d if d >= today else date(today.year + 1, month, day)
-    except ValueError:
+                found.append((m.start(), date(int(m[3]), month, day)))
+            else:
+                d = date(today.year, month, day)
+                found.append((m.start(), d if d >= today else date(today.year + 1, month, day)))
+        except ValueError:
+            pass
+    return sorted(found)
+
+
+def due_date_from_request(text: str, today: date) -> date:
+    """The reminder's date. One date: that one. Several: prefer those after the word "remind"/"reminder", then the
+    one introduced by on/by/before/due/until/for; if that still leaves more than one, refuse (``ReminderError``)
+    rather than guess. ``today`` is supplied by the caller (the job's date), never read from the system clock."""
+    mentions = _mentions(text, today)
+    if not mentions:
+        raise ReminderError("no deadline date found in the request (use YYYY-MM-DD)")
+    remind = _REMIND.search(text)
+    pool = [m for m in mentions if remind and m[0] >= remind.end()] or mentions
+    if len({d for _, d in pool}) > 1:
+        led = [m for m in pool if _LEAD.search(text[max(0, m[0] - 14):m[0]])]
+        pool = led if len({d for _, d in led}) == 1 else pool
+    dates = sorted({d for _, d in pool})
+    if len(dates) > 1:
+        raise ReminderError("several dates in the request and none clearly follows 'remind me' "
+                            f"({', '.join(d.isoformat() for d in dates)}); say 'remind me on YYYY-MM-DD'")
+    return dates[0]
+
+
+def extract_due_date(text: str, today: date) -> date | None:
+    """``due_date_from_request`` that returns ``None`` instead of raising (no date, or an ambiguous request)."""
+    try:
+        return due_date_from_request(text, today)
+    except ReminderError:
         return None
-    return None
 
 
 def title_from_request(request: str) -> str:
@@ -166,7 +204,7 @@ def build_ics(draft: ReminderDraft, stamp: datetime) -> bytes:
         "BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:{PRODID}", "CALSCALE:GREGORIAN",
         "BEGIN:VEVENT",
         f"UID:{draft.reminder_id}@{UID_DOMAIN}",
-        f"DTSTAMP:{stamp.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTAMP:{(stamp.astimezone(UTC) if stamp.tzinfo else stamp).strftime('%Y%m%dT%H%M%SZ')}",  # naive = UTC
         f"DTSTART;VALUE=DATE:{draft.due_date.strftime('%Y%m%d')}",
         f"SUMMARY:{_escape(draft.title)}",
         f"DESCRIPTION:{_escape(description)}",
@@ -175,13 +213,28 @@ def build_ics(draft: ReminderDraft, stamp: datetime) -> bytes:
     return b"".join(part + b"\r\n" for line in lines for part in _fold(line))
 
 
+def ics_filename(draft: ReminderDraft) -> str:
+    """``<reminder_id>-<8 hex of the job's correlation ID>.ics``: two jobs with identical content get different files."""
+    if not _REMINDER_ID.fullmatch(draft.reminder_id):
+        raise ReminderError("reminder_id is not in the expected form (rem_ + 16 hex digits)")
+    return f"{draft.reminder_id}-{hashlib.sha256(draft.correlation_id.encode()).hexdigest()[:8]}.ics"
+
+
 def export_ics(draft: ReminderDraft, directory: Path, stamp: datetime) -> tuple[Path, bytes]:
     """Write an *approved* reminder's ``.ics`` under ``directory`` and return ``(path, bytes)``. Only approved
-    reminders are exported, so a draft or rejected one never produces a file."""
+    reminders are exported, so a draft or rejected one never produces a file. Refuses a symlinked directory or
+    target, and a ``reminder_id`` that is not ``rem_`` + 16 hex digits (checked before any path is built)."""
     if draft.status != "approved":
         raise ReminderError(f"only an approved reminder can be exported (status is {draft.status})")
+    name = ics_filename(draft)
+    if directory.is_symlink():
+        raise ReminderError("export directory is a symbolic link; refusing to write")
     content = build_ics(draft, stamp)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{draft.reminder_id}.ics"
-    path.write_bytes(content)
+    path = directory / name
+    if path.is_symlink():
+        raise ReminderError("export target is a symbolic link; refusing to write")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(content)
     return path, content
