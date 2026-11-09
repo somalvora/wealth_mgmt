@@ -36,7 +36,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.models` | Pydantic `Account` and `Transaction`; enums | 6 | — |
 | `household_agent.authz` | Deny-by-default `Authorizer`, `ConsentGrant` | 7 | (enforced inside every tool) |
 | `household_agent.audit` | Hash-chained `AuditLog` | 7 | — |
-| `household_agent.ingest` | `parse_statement_csv` with line provenance | 3.1, 6 | `parse_statement` |
+| `household_agent.ingest` | `parse_statement` (picks CSV or PDF by `%PDF-` magic bytes), `parse_statement_csv`, `parse_statement_pdf` (`pypdf`, text layer only) with line provenance | 3.1, 6 | `parse_statement` |
 | `household_agent.categorize` | Rule-based merchant normalization | 6 | (part of ingest) |
 | `household_agent.reconcile` | Checks, status, `document_confidence` | 3.3 | `reconcile_statement` |
 | `household_agent.ledger` | Append-only `LedgerStore` | 6 | `query_ledger` |
@@ -61,7 +61,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 
 ## 3. Data flow: ingesting a statement
 
-1. **Parse.** The parser validates header fields, column names and every row. Row problems become `RowError`s and are kept rather than dropped. The parser computes `source_hash = sha256(file bytes)`.
+1. **Parse.** `parse_statement` chooses the parser from the bytes: `%PDF-` means the PDF parser, anything else CSV. The PDF parser rejects files over 5 MB or 20 pages, encrypted or corrupt files, and PDFs with no text layer (scans need OCR, which is not built). It reads labelled header lines and a `Date Description Amount [Balance]` table from the extracted text, treats that text as untrusted data (matched against fixed patterns only, never followed as instructions), checks any running-balance column against the amounts, and converts amounts to integer cents with the same `to_minor` helper. Both parsers produce the same `ParsedStatement`, so everything below is shared. The agent's `ingest_statement` tool passes `allow_pdf=False`, so over that tool a PDF is refused; PDFs enter through `pipeline.ingest_statement`/`ingest_file`. The parser validates header fields, column names and every row. Row problems become `RowError`s and are kept rather than dropped. The parser computes `source_hash = sha256(file bytes)`.
 2. **Categorize.** Each description goes through a case-insensitive rule match. A match gives `merchant_normalized`, a category and confidence 0.98. No match gives `uncategorized` with confidence 0.0, which lowers `mapped_merchant_rate`.
 3. **Reconcile.** These checks run (tolerance is 0 cents):
 

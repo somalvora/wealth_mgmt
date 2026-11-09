@@ -220,6 +220,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_finance.py` | 15 (+ parametrized cases) | Money parsing and formatting, cash flow, category totals, variance, drift, amortization; hypothesis properties |
 | `test_authz.py` | 11 | Owner access, cross-member denial, joint all-owner consent, delegate expiry and revocation, dependents |
 | `test_audit.py` | 4 | Chain verification, UPDATE/DELETE blocked, tamper detection |
+| `test_pdf_ingest.py` | 26 | PDF and equivalent CSV give identical header and rows (3 statements, with and without a running-balance column), PDF reconciles and is audited, deterministic parse, parser chosen by `%PDF-` bytes not file name, multi-page; no text layer ("needs OCR"), encrypted, oversize, too many pages, truncated (3 cases), garbage, missing header/table rejected; non-reconciling PDF is unreconciled and returns no rows even provisionally; bad running balance and stray or injected text become row errors; injected text is only data; duplicate upload blocked; the agent tool refuses PDF; random transactions round-trip through a PDF to the same cents and dates (hypothesis) |
 | `test_ingest_reconcile.py` | 11 | Parser provenance and errors; reconciled, qualified and unreconciled outcomes; duplicates, reversals, confidence |
 | `test_ledger_and_calcs.py` | 10 | Upload denial audited, re-import blocked, provisional and unreconciled filtering, versioned corrections, reproducible calculations |
 | `test_planning.py` | 17 | Allocation expansion and constraints, 15-node beam search, rollout scoring, liquidity tie-break, hard pruning, advisory critic |
@@ -238,7 +239,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_eval_quality.py` | 17 | Cluster rules (7-day cluster, burst, card-testing probes) with hand-computed totals, runner splits baseline and returns transaction IDs, all four quality areas pass offline, cluster rules lift anomaly recall from 0.4 to 1.0, calculation oracle independent of the library, word-overlap check keeps a paraphrase and drops an unrelated source, no cluster rules → anomaly gate fails, wrong oracle value → calculation gate fails, a validator that trusts every citation fails precision, retrieval without scope filtering leaks and exposes canaries (retrieval + model prompts), allow-all authorizer exposes canaries in briefings and tools, baseline/categorized/credit rows never alert, strict limits ($300.00 exactly, 9 per day, 2 probes, 8 days late), every alert meets its rule and a full baseline silences all (hypothesis), any seed scores numbers and anomalies perfectly (hypothesis) |
 | `test_vertical_slice.py` | 12 | All 14 §12 checks pass offline, calc run → transactions → source hashes → correlation ID, artifacts kept in the workdir (briefing has the variance and pending approval, no private card), resume doesn't re-run planning, CLI report and exit code, model-factory path (router + specialists), a ledger model that skips its tools fails the trace while every guardrail check still passes, a router that hides a transfer is still refused, a misrouted allocation request fails the approval check without crashing, empty/failed reports not passed, playback past its script, any correlation ID tags every job event (hypothesis) |
 
-Total: **336 passing**.
+Total: **362 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
@@ -262,12 +263,31 @@ date,description,amount
 
 Every header field is required. Amounts are signed decimal strings with at most 2 decimal places. A broken row is kept as an error, which marks the whole statement unreconciled; it is never silently dropped.
 
+### Text-based PDF statements (`hh_statement_pdf_v1`)
+
+`pipeline.ingest_statement` picks the parser from the bytes: a file starting with `%PDF-` goes to the PDF parser (`pypdf`, pure Python), anything else to the CSV parser. The PDF must have an extractable text layer laid out as labelled header lines followed by a table, one transaction per line:
+
+```
+Household ID: hh_demo
+Account ID: acct_rental_checking
+Currency: USD
+Statement Period: 2026-10-01 to 2026-10-31
+Opening Balance: 17,240.00
+Closing Balance: 16,571.60
+Total Credits: 3,100.00
+Total Debits: 3,768.40
+Date Description Amount          (or: Date Description Amount Balance)
+2026-10-01 RENT DEPOSIT UNIT B 3,100.00
+```
+
+The result is the same `ParsedStatement` as the CSV path, so categorization, reconciliation, confidence, `source_hash` (sha256 of the PDF bytes), duplicate blocking and audit are unchanged. Limits: at most 5 MB and 20 pages; encrypted, corrupt and truncated files are rejected; a PDF with no text layer is rejected with a "needs OCR" error (OCR is **not** built); a date-led line that doesn't match the layout, any other stray text in the table, or a running balance that disagrees with the amounts becomes a row error (statement unreconciled). PDF text is treated as data only. `reportlab` (dev dependency) is used by the tests to generate PDFs.
+
 ## Known gaps (Phase 1)
 
 These parts of the design are not implemented yet:
 
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
-- **Statement formats.** There is no PDF/OCR ingestion; only the CSV format above is supported.
+- **Statement formats.** CSV and text-based PDF statements are supported (see below). **OCR is not built**: a scanned PDF with no text layer is rejected. The agent's `ingest_statement` tool still takes CSV text only; PDFs go in through `pipeline.ingest_statement`/`ingest_file`.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
 - **Agents and orchestration.** The Supervisor and both specialists run end to end in `vertical_slice`, but only with offline playback models so far; a real-model run on the Ollama machine is still needed. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
