@@ -26,9 +26,16 @@ With a checkpointer (``run(..., checkpointer=...)``) the graph gains a ``review`
 threshold finding or any result that is not ``completed`` pauses the job with ``interrupt()``
 until an authorized household member resolves it (``Supervisor.resume``). Without one the
 job runs straight through to the briefing, as before.
+
+``draft_reminder`` is a Supervisor-only tool (never on a specialist's allowlist). A request such as "add my renewal on
+2026-12-15 to my calendar" is not refused: the Supervisor drafts a reminder from the job's own evidence and lists it under
+"Actions for Approval". With a checkpointer the job then pauses (``reminder_approval``) until an authorized adult or
+admin approves or rejects it; approval writes a local ``.ics`` file under ``reminder_dir``. No calendar is connected
+and nothing is sent anywhere (see ``reminders.py``). Money movement is still refused.
 """
 
 import contextvars
+import hashlib
 import json
 import re
 import uuid
@@ -45,6 +52,8 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt
+from pathlib import Path
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from household_agent.approval import APPROVER_ROLES, start_request
@@ -53,6 +62,17 @@ from household_agent.authz import Actor, Authorizer
 from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
 from household_agent.models import Action
+from household_agent.reminders import (
+    MAX_EVIDENCE_IDS,
+    ReminderDraft,
+    ReminderError,
+    audit_reminder,
+    draft_reminder,
+    export_ics,
+    extract_due_date,
+    title_from_request,
+    transition,
+)
 from household_agent.retrieval import COLLECTIONS, Claim, RetrievalRequestError, RetrievalService, validate_claims
 from household_agent.tools import ToolSession
 from household_finance.money import format_minor
@@ -68,6 +88,7 @@ MAX_QUERY_REFINEMENTS = 2
 VARIANCE_REVIEW_PCT = Decimal("15")  # design §5.4 default for any category or bill
 VARIANCE_REVIEW_PCT_BY_CATEGORY: dict[str, Decimal] = {"property_tax": Decimal("10")}  # §5.4 per-category override
 REVIEW_WORKFLOW = "supervisor_review"
+REMINDER_WORKFLOW = "reminder_approval"
 PURPOSE_FOR_INTENT: dict[str, str] = {
     "historical_comparison": "historical_comparison",
     "historical_comparison_and_tax_context": "historical_comparison",
@@ -132,6 +153,7 @@ class RoutingDecision(BaseModel):
     intent: Intent
     dispatch_plan: list[DispatchItem] = Field(default_factory=list, max_length=MAX_DISPATCHES)
     external_action_requested: bool = False
+    reminder_requested: bool = False  # a draft reminder, never a refusal; needs approval before an .ics exists
     approval_required: bool = False
 
 
@@ -413,6 +435,9 @@ class PolicyCompliance:
 # --- routing -----------------------------------------------------------------------------
 
 _EXTERNAL = re.compile(r"\b(pay|transfer|wire|send money|move money|schedule a payment|make a payment)\b", re.I)
+_MOVE_MONEY = re.compile(r"\b(transfer|wire|send money|move money|schedule a payment|make a payment)\b", re.I)
+_REMINDER = re.compile(r"\b(remind me|set (?:up )?(?:a |an )?reminder|calendar reminder|add\b.{0,120}?\bto (?:my|the|our) calendar)",
+                       re.I)
 _PLANNING = re.compile(r"\b(allocate|surplus|where should .* money|invest|capital allocation)\b", re.I)
 _LEDGER = re.compile(r"\b(unusual|compare|compared|last year|higher|lower|variance|spent|spend|paid)\b", re.I)
 _POLICY = re.compile(r"\b(tax|deduct\w*|accounted for|lease|rule|policy|compliance)\b", re.I)
@@ -422,13 +447,19 @@ def rule_route(request: str) -> RoutingDecision:
     """Keyword fallback router; also the safe default when the model's routing is invalid."""
     if _PLANNING.search(request):
         return RoutingDecision(intent="allocation_planning", approval_required=True)
-    external = bool(_EXTERNAL.search(request)) and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
+    reminder = bool(_REMINDER.search(request))
+    # "remind me to pay X" is a reminder; only real money movement is refused in that case.
+    external = bool(_MOVE_MONEY.search(request) if reminder else _EXTERNAL.search(request)) \
+        and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
     ledger, policy = bool(_LEDGER.search(request)), bool(_POLICY.search(request))
     plan = ([DispatchItem(agent="ledger_analyst", task=request)] if ledger else []) + \
            ([DispatchItem(agent="policy_compliance", task=request)] if policy else [])
+    if reminder and not plan and not external:  # the deadline's source evidence comes from the policy documents
+        plan, policy = [DispatchItem(agent="policy_compliance", task=request, depends_on_ledger=False)], True
     intent: Intent = ("historical_comparison_and_tax_context" if ledger and policy else
                       "historical_comparison" if ledger else "tax_context" if policy else "out_of_scope")
-    return RoutingDecision(intent=intent, dispatch_plan=plan, external_action_requested=external)
+    return RoutingDecision(intent=intent, dispatch_plan=plan, external_action_requested=external,
+                           reminder_requested=reminder)
 
 
 @dataclass
@@ -443,8 +474,12 @@ class Router:
             decision = RoutingDecision.model_validate_json(_FENCE.sub("", str(reply.text).strip()))
         except ValidationError:
             return rule_route(request), "rules_fallback"
-        if _EXTERNAL.search(request) and rule_route(request).external_action_requested:
+        rules = rule_route(request)
+        if _EXTERNAL.search(request) and rules.external_action_requested:
             decision = decision.model_copy(update={"external_action_requested": True})  # never trust a model "no"
+        if rules.reminder_requested:  # the request text decides, not the model's flags
+            decision = decision.model_copy(update={"reminder_requested": True,
+                                                   "external_action_requested": rules.external_action_requested})
         return decision, "model"
 
 
@@ -461,6 +496,10 @@ class JobState(TypedDict, total=False):
     approval_thread_id: str
     review: dict[str, Any]
     review_denied_attempts: int
+    reminder: dict[str, Any]
+    reminder_error: str
+    reminder_denied_attempts: int
+    reminder_file: str
     status: str
     briefing: dict[str, Any]
 
@@ -484,11 +523,17 @@ def _needs_review(state: JobState) -> bool:
 def compose_briefing(state: JobState) -> dict[str, Any]:
     """Deterministic: lists only validated claims, open questions and review flags."""
     results = [AgentResult.model_validate(r) for r in state.get("results", [])]
+    reminder, error = state.get("reminder"), state.get("reminder_error")
+    actions = [] if not reminder else [{
+        "kind": "reminder", "reminder": reminder,
+        "text": (f"Reminder \"{reminder['title']}\" due {reminder['due_date']} is {reminder['status']}. Approving it only "
+                 "writes a local .ics file; no calendar is connected and nothing is sent.")}]
     return {
         "intent": state["routing"]["intent"],
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
                        for r in results for c in r.claims],
-        "questions": [q for r in results for q in r.questions],
+        "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else []),
+        "actions_for_approval": actions,
         "findings": state.get("findings", []),
         "needs_review": any(r.status != "completed" for r in results) or bool(state.get("findings")),
         "external_action": "none: the system only drafts; it never moves money",
@@ -529,6 +574,7 @@ class Supervisor:
     job_seconds: int = JOB_SECONDS
     members: Mapping[str, Actor] = field(default_factory=dict)  # who may resolve a review
     authorizer: Authorizer | None = None  # re-checks the reviewer's access to the job's accounts
+    reminder_dir: Path | None = None  # where an approved reminder's .ics is written; None = never export
 
     def _audit(self, state: JobState, action: str, decision: str, reason: str, *, actor_id: str | None = None,
                **details: Any) -> None:
@@ -687,7 +733,7 @@ class Supervisor:
             return {"findings": findings}
 
         def after_threshold(state: JobState) -> str:
-            return "review" if checkpointer is not None and _needs_review(state) else "compose"
+            return "review" if checkpointer is not None and _needs_review(state) else "remind"
 
         def review(state: JobState) -> JobState:
             # Nothing before interrupt() has side effects: on resume this node runs again from the top.
@@ -709,7 +755,75 @@ class Supervisor:
             return {"review": decision, "status": status}
 
         def after_review(state: JobState) -> str:
-            return "compose" if state.get("review") else "review"
+            return "remind" if state.get("review") else "review"
+
+        def remind(state: JobState) -> JobState:
+            """Draft (only) a reminder from this job's own evidence. Audited here, once; the interrupt is in the next node."""
+            if not state["routing"].get("reminder_requested"):
+                return {}
+            now = self.clock()
+            evidence = sorted({i for r in state["results"] for i in r["evidence_ids"]})
+            due = extract_due_date(state["request"], now.date())
+            try:
+                if due is None:
+                    raise ReminderError("no deadline date found in the request (use YYYY-MM-DD)")
+                draft = draft_reminder(
+                    title=title_from_request(state["request"]), due_date=due, evidence_ids=evidence[:MAX_EVIDENCE_IDS],
+                    job_evidence_ids=evidence, household_id=self.actor.household_id,
+                    requested_by=self.actor.member_id, correlation_id=state["correlation_id"], today=now.date())
+            except ReminderError as exc:
+                self._audit(state, "draft_reminder", "deny", str(exc))
+                return {"reminder_error": str(exc)}
+            audit_reminder(self.audit, draft, actor_id=self.actor.member_id, action="draft_reminder", decision="info",
+                           reason="draft created", at=now, due_date=draft.due_date.isoformat(),
+                           evidence_ids=list(draft.source_evidence_ids))
+            out: JobState = {"reminder": draft.model_dump(mode="json")}
+            if checkpointer is not None:
+                out["status"] = "awaiting_reminder_approval"
+            return out
+
+        def after_remind(state: JobState) -> str:
+            return "reminder_approval" if checkpointer is not None and state.get("reminder") else "compose"
+
+        def reminder_approval(state: JobState) -> JobState:
+            # Nothing before interrupt() has side effects: on resume this node runs again from the top.
+            draft = ReminderDraft.model_validate(state["reminder"])
+            answer = interrupt({"kind": REMINDER_WORKFLOW, "correlation_id": state["correlation_id"],
+                                "reminder": state["reminder"]})
+            answer = answer if isinstance(answer, Mapping) else {}
+            approver_id = str(answer.get("approver", ""))
+            denial = self._reviewer_denial(approver_id, state)
+            if denial:  # audited; the reminder stays a draft and the job keeps waiting
+                audit_reminder(self.audit, draft, actor_id=approver_id or "unknown", action=Action.APPROVE.value,
+                               decision="deny", reason=denial, at=self.clock())
+                return {"reminder_denied_attempts": state.get("reminder_denied_attempts", 0) + 1}
+            new = transition(draft, "approved" if answer.get("approved") is True else "rejected")
+            audit_reminder(self.audit, new, actor_id=approver_id, action=Action.APPROVE.value, decision="allow",
+                           reason=new.status, at=self.clock(), note=str(answer.get("note", "")))
+            return {"reminder": new.model_dump(mode="json"), "status": f"reminder_{new.status}"}
+
+        def after_reminder_approval(state: JobState) -> str:
+            status = state["reminder"]["status"]
+            return "reminder_approval" if status == "draft" else "reminder_create" if status == "approved" else "compose"
+
+        def reminder_create(state: JobState) -> JobState:
+            """Approved -> created: write the local .ics. This is the only place a reminder file is made."""
+            draft, now = ReminderDraft.model_validate(state["reminder"]), self.clock()
+            if self.reminder_dir is None:
+                audit_reminder(self.audit, draft, actor_id=self.actor.member_id, action="create_reminder",
+                               decision="deny", reason="no export directory configured; reminder stays approved", at=now)
+                return {}
+            try:
+                path, content = export_ics(draft, self.reminder_dir, now)
+            except OSError as exc:
+                audit_reminder(self.audit, draft, actor_id=self.actor.member_id, action="create_reminder",
+                               decision="deny", reason=f"export failed: {type(exc).__name__}", at=now)
+                return {}
+            created = transition(draft, "created")
+            audit_reminder(self.audit, created, actor_id=self.actor.member_id, action="create_reminder",
+                           decision="allow", reason="local .ics written; no calendar connected", at=now,
+                           file=path.name, ics_sha256=hashlib.sha256(content).hexdigest())
+            return {"reminder": created.model_dump(mode="json"), "reminder_file": str(path), "status": "reminder_created"}
 
         def compose(state: JobState) -> JobState:
             briefing = compose_briefing(state)
@@ -719,14 +833,21 @@ class Supervisor:
 
         g = StateGraph(JobState)
         for name, fn in [("classify", classify), ("refuse", refuse), ("plan", plan), ("dispatch", dispatch),
-                         ("threshold", threshold), ("compose", compose)]:
+                         ("threshold", threshold), ("remind", remind), ("compose", compose)]:
             g.add_node(name, fn)
         if checkpointer is not None:
             g.add_node("review", review)
-            g.add_conditional_edges("threshold", after_threshold, ["review", "compose"])
-            g.add_conditional_edges("review", after_review, ["review", "compose"])
+            g.add_node("reminder_approval", reminder_approval)
+            g.add_node("reminder_create", reminder_create)
+            g.add_conditional_edges("threshold", after_threshold, ["review", "remind"])
+            g.add_conditional_edges("review", after_review, ["review", "remind"])
+            g.add_conditional_edges("remind", after_remind, ["reminder_approval", "compose"])
+            g.add_conditional_edges("reminder_approval", after_reminder_approval,
+                                    ["reminder_approval", "reminder_create", "compose"])
+            g.add_edge("reminder_create", "compose")
         else:
-            g.add_edge("threshold", "compose")
+            g.add_edge("threshold", "remind")
+            g.add_edge("remind", "compose")
         g.add_edge(START, "classify")
         g.add_conditional_edges("classify", after_classify, ["refuse", "plan", "dispatch", "compose"])
         g.add_conditional_edges("dispatch", after_dispatch, ["dispatch", "threshold"])
