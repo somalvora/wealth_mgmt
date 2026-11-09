@@ -5,6 +5,7 @@ reject UPDATE/DELETE); a correction inserts a new transaction version. Every wri
 is authorized first and audited, whether allowed or denied.
 """
 
+import functools
 import json
 import sqlite3
 import uuid
@@ -99,6 +100,16 @@ class DuplicateDocumentError(ValueError):
     pass
 
 
+def _locked(method):
+    """Run a method under the connection-level lock (``audit.lock``): one sqlite3 connection must never be read
+    while another thread is in the middle of a transaction on it."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.audit.lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class LedgerStore:
     def __init__(self, conn: sqlite3.Connection, authorizer: Authorizer, audit: AuditLog):
         self.conn = conn
@@ -155,10 +166,18 @@ class LedgerStore:
         assert account is not None  # authorize() denies unknown accounts
         if h.household_id != account.household_id:
             raise ValueError("statement household does not match account household")
+        document_id = f"doc_{uuid.uuid4().hex[:16]}"
+        # One lock across duplicate check, inserts, commit/rollback and the closing audit event: another
+        # thread's audit commit can no longer commit half of this ingest, and two ingests of the same
+        # statement cannot both pass the duplicate check.
+        with self.audit.lock:
+            self._ingest_locked(document_id, actor, correlation_id, parsed, categorized, recon, account, at)
+        return document_id
+
+    def _ingest_locked(self, document_id, actor, correlation_id, parsed, categorized, recon, account, at):
+        h = parsed.header
         if self.conn.execute("SELECT 1 FROM documents WHERE source_hash = ?", (parsed.source_hash,)).fetchone():
             raise DuplicateDocumentError(f"{parsed.source_name} was already ingested")
-
-        document_id = f"doc_{uuid.uuid4().hex[:16]}"
         with self.conn:
             self.conn.execute(
                 "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -209,7 +228,6 @@ class LedgerStore:
                 "rows": len(parsed.rows), "row_errors": len(parsed.row_errors),
             },
         )
-        return document_id
 
     def correct_transaction(
         self,
@@ -232,12 +250,12 @@ class LedgerStore:
         if merchant_normalized is not None:
             changes["merchant_normalized"] = merchant_normalized
         corrected = current.model_copy(update=changes)
-        with self.conn:
+        with self.audit.lock, self.conn:
             self._insert_txn(corrected)
         return corrected
 
     def record_calculation_run(self, row: dict) -> None:
-        with self.conn:
+        with self.audit.lock, self.conn:
             self.conn.execute(
                 "INSERT INTO calculation_runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -250,10 +268,12 @@ class LedgerStore:
 
     # --- reads ------------------------------------------------------------------
 
+    @_locked
     def historical_row_hashes(self, account_id: str) -> set[str]:
         cur = self.conn.execute("SELECT DISTINCT row_hash FROM transactions WHERE account_id = ?", (account_id,))
         return {r[0] for r in cur}
 
+    @_locked
     def query_transactions(
         self,
         actor: Actor,
@@ -298,6 +318,7 @@ class LedgerStore:
         cur = self.conn.execute(sql + " ORDER BY t.posted_at, t.transaction_id", params)
         return [Transaction(**dict(zip(_TXN_COLUMNS, r, strict=True))) for r in cur]
 
+    @_locked
     def verified_statements(
         self,
         actor: Actor,
@@ -335,6 +356,7 @@ class LedgerStore:
                 "closing_balance_minor")
         return [dict(zip(cols, r, strict=True)) for r in cur]
 
+    @_locked
     def document_coverage(
         self,
         actor: Actor,
@@ -368,6 +390,7 @@ class LedgerStore:
                 "document_confidence", "unverified", "issues")
         return [{**dict(zip(cols, r, strict=True)), "unverified": bool(r[7]), "issues": json.loads(r[8])} for r in cur]
 
+    @_locked
     def document_status(self, document_id: str) -> dict:
         cur = self.conn.execute(
             "SELECT reconciliation_status, document_confidence, unverified, issues_json FROM documents WHERE document_id = ?",
@@ -385,6 +408,7 @@ class LedgerStore:
             tuple(values[c] for c in _TXN_COLUMNS),
         )
 
+    @_locked
     def _latest(self, transaction_id: str) -> Transaction:
         cur = self.conn.execute(
             f"SELECT {', '.join(_TXN_COLUMNS)} FROM transactions WHERE transaction_id = ? ORDER BY version DESC LIMIT 1",

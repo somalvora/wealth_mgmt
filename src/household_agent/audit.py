@@ -61,8 +61,16 @@ class AuditLog:
         # Two specialists may append from different threads: read-last-hash + insert must be one step,
         # or two events could share a prev_hash and break the chain. (The connection itself must be
         # opened with check_same_thread=False for cross-thread use.)
+        # The same re-entrant lock is shared with LedgerStore and ConsentStore (``audit.lock``): they all
+        # use one connection, so a transaction in one store must never interleave with another thread's
+        # commit() or rollback() in a different store.
         self._lock = threading.RLock()
         conn.executescript(_SCHEMA)
+
+    @property
+    def lock(self) -> threading.RLock:
+        """Connection-level re-entrant lock; hold it across a whole multi-statement transaction."""
+        return self._lock
 
     def append(
         self,
@@ -113,10 +121,11 @@ class AuditLog:
     def verify(self) -> int:
         """Recompute the chain; returns the number of events or raises ``AuditIntegrityError``."""
         prev_hash, count = GENESIS_HASH, 0
-        cur = self._conn.execute(
-            f"SELECT seq, {', '.join(_HASHED_FIELDS)}, prev_hash, hash FROM audit_events ORDER BY seq"
-        )
-        for row in cur:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT seq, {', '.join(_HASHED_FIELDS)}, prev_hash, hash FROM audit_events ORDER BY seq"
+            ).fetchall()
+        for row in rows:
             seq, values, stored_prev, stored_hash = row[0], row[1:-2], row[-2], row[-1]
             fields = dict(zip(_HASHED_FIELDS, values, strict=True))
             if stored_prev != prev_hash or _event_hash(fields, prev_hash) != stored_hash:
@@ -130,5 +139,6 @@ class AuditLog:
         if correlation_id:
             sql += " WHERE correlation_id = ?"
             params = (correlation_id,)
-        cur = self._conn.execute(sql + " ORDER BY seq", params)
-        return [dict(zip(("seq", *_HASHED_FIELDS), r, strict=True)) for r in cur]
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY seq", params).fetchall()
+        return [dict(zip(("seq", *_HASHED_FIELDS), r, strict=True)) for r in rows]

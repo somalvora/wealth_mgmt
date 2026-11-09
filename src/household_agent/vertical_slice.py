@@ -229,7 +229,8 @@ class _Env:
 
     @classmethod
     def open(cls, workdir: Path) -> "_Env":
-        conn = sqlite3.connect(workdir / "ledger.db")
+        # specialists run on worker threads; AuditLog/LedgerStore/ConsentStore serialize with one shared lock
+        conn = sqlite3.connect(workdir / "ledger.db", check_same_thread=False)
         authorizer, audit = Authorizer(ACCOUNTS), AuditLog(conn)
         consent = ConsentStore(conn, authorizer, audit)  # reloads persisted grants and revocations
         store = LedgerStore(conn, authorizer, audit)
