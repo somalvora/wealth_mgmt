@@ -259,7 +259,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_eval_progress.py` | 4 | The eval harness calls a progress callback once per scenario in order (no callback is fine); the CLI prints `[elapsed] i/n area id` lines to stderr and keeps the report on stdout; count matches for any seed and slice (hypothesis) |
 
-Total: **612 passing**.
+| `test_router_call_errors.py` | 5 | A router model call that raises (dropped connection, API 500) falls back to the keyword rules and is recorded `rules_fallback`; the fallback still refuses money movement; Ctrl-C is not swallowed; no model still reports `rules`; any ordinary error gives the rules decision (hypothesis) |
+
+Total: **617 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 

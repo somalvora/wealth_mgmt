@@ -604,7 +604,10 @@ class Router:
     def __call__(self, request: str) -> tuple[RoutingDecision, str]:
         if self.model is None:
             return rule_route(request), "rules"
-        reply = self.model.invoke([SystemMessage(ROUTER_PROMPT), HumanMessage(request)])
+        try:
+            reply = self.model.invoke([SystemMessage(ROUTER_PROMPT), HumanMessage(request)])
+        except Exception:  # dropped connection or API error: the keyword rules still route the request
+            return rule_route(request), "rules_fallback"
         try:
             decision = RoutingDecision.model_validate_json(_FENCE.sub("", str(reply.text).strip()))
         except ValidationError:
