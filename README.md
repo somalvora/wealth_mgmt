@@ -257,7 +257,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_request_timeout.py` | 5 | Hosted Gemini and Groq clients carry a finite per-request timeout (90 s), for every Gemini model, so one unanswered request fails and is retried instead of hanging a run |
 
-Total: **608 passing**.
+| `test_eval_progress.py` | 4 | The eval harness calls a progress callback once per scenario in order (no callback is fine); the CLI prints `[elapsed] i/n area id` lines to stderr and keeps the report on stdout; count matches for any seed and slice (hypothesis) |
+
+Total: **612 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
