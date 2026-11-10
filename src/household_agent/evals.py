@@ -375,6 +375,7 @@ def evaluate(
         world.close()
 
     metrics = {k: _ratio(*v) for k, v in tally.items()}
+    metrics |= {"router_model_calls": float(model_calls), "router_fallbacks": float(model_calls - schema_ok)}
     metrics |= {"schema_validity": _ratio(schema_ok, model_calls), "approval_gating": _ratio(approval_ok, approval_cases),
                 "unsafe_actions": float(unsafe), "cross_member_leaks": float(leaks),
                 "max_node_evaluations": float(max_evals),
@@ -404,6 +405,28 @@ def evaluate(
     return EvalReport(EVAL_VERSION, counts, metrics, gates, failures)
 
 
+def preflight(checks: dict[str, Callable[[], object]]) -> list[str]:
+    """Make one real call per model before a long run; a dead or retired model name is reported by error type only."""
+    problems = []
+    for name, call in checks.items():
+        try:
+            call()
+        except Exception as e:  # the fallbacks would otherwise turn this into a run that looks mostly fine
+            problems.append(f"{name}: {type(e).__name__}")
+    return problems
+
+
+def fallback_summary(report: EvalReport, generator: Any = None, critic: Any = None) -> str:
+    """One line saying how much of a model run was really the rules/templates."""
+    m = report.metrics
+    parts = [f"router {int(m.get('router_fallbacks', 0))}/{int(m.get('router_model_calls', 0))}"]
+    if generator is not None:
+        parts.append(f"planner thoughts {len(generator.fallbacks)}")
+    if critic is not None:
+        parts.append(f"critic {len(critic.failures)}")
+    return "model fallbacks (rules/templates used instead of the model): " + ", ".join(parts)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m household_agent.evals", description=__doc__.splitlines()[0])
     ap.add_argument("--model", help="chat model spec for the router, e.g. ollama:qwen3:8b or groq:qwen/qwen3-32b (default: keyword router)")
@@ -415,20 +438,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     router, generator, critic = Router(), None, None
+    checks: dict[str, Callable[[], object]] = {}
     if args.model or args.planner_model:
         from household_agent.llm import get_chat_model
         if args.model:
-            router = Router(get_chat_model(args.model))
+            chat = get_chat_model(args.model)
+            router = Router(chat)
+            checks[f"--model {args.model}"] = lambda: chat.invoke("Reply with the single word: ok")
         if args.planner_model:
             from household_agent.llm_planner import LLMCritic, LLMThoughtGenerator
             model = get_chat_model(args.planner_model)
             generator = LLMThoughtGenerator(model, model_id=args.planner_model)
             critic = LLMCritic(model, model_id=args.planner_model)
+            checks[f"--planner-model {args.planner_model}"] = lambda: model.invoke("Reply with the single word: ok")
 
     embeddings = None
     if args.embed_model:
         from household_agent.llm import get_embeddings
         embeddings = get_embeddings(args.embed_model)
+        checks[f"--embed-model {args.embed_model}"] = lambda: embeddings.embed_query("ok")
+
+    if problems := preflight(checks):  # fail now, not after hours of silent fallbacks
+        print("preflight failed, nothing was evaluated: " + "; ".join(problems), file=sys.stderr)
+        return 2
 
     scenarios = generate_scenarios(args.seed)
     started = datetime.now(UTC)
@@ -442,6 +474,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for g in report.gates:
         print(f"  {'PASS' if g.passed else 'FAIL'}  {g.name:<24} {g.value:.4f}  (target {g.target})")
     print(f"  not covered yet: {', '.join(report.not_covered)}")
+    if checks:
+        print("  " + fallback_summary(report, generator, critic))
     if args.out:
         with open(args.out, "w") as fh:
             fh.write(report.to_json())
