@@ -129,7 +129,10 @@ class LLMThoughtGenerator:
     def propose(self, inputs: PlanningInputs, node: PlanNode, tier: int) -> Sequence[Thought]:
         ask = {"tier": tier, "allowed_buckets": sorted(TIER_BUCKETS[tier]), "personas": list(PERSONAS),
                **_context(inputs, node)}
-        reply = self.model.invoke([SystemMessage(GENERATOR_SYSTEM), HumanMessage(json.dumps(ask))])
+        try:
+            reply = self.model.invoke([SystemMessage(GENERATOR_SYSTEM), HumanMessage(json.dumps(ask))])
+        except Exception as e:  # noqa: BLE001  a dropped connection or API error is treated like an unusable reply
+            return [self._fallback(node, tier, p, f"model call failed: {type(e).__name__}") for p in PERSONAS]
         try:
             raw = _ThoughtsReply.model_validate_json(_clean(str(reply.text))).thoughts
         except ValidationError as e:
@@ -167,7 +170,11 @@ class LLMCritic:
                "deterministic_scores": {"tax_efficiency": str(node.score.tax_efficiency),
                                         "liquidity_safety": str(node.score.liquidity_safety),
                                         "expected_net_yield": str(node.score.expected_net_yield)}}
-        reply = self.model.invoke([SystemMessage(CRITIC_SYSTEM), HumanMessage(json.dumps(ask))])
+        try:
+            reply = self.model.invoke([SystemMessage(CRITIC_SYSTEM), HumanMessage(json.dumps(ask))])
+        except Exception as e:  # noqa: BLE001  no opinion, recorded, exactly like an unparseable reply
+            self.failures.append({"node_id": node.node_id, "reason": f"model call failed: {type(e).__name__}"})
+            return node.score.composite
         try:
             parsed = _CriticReply.model_validate_json(_clean(str(reply.text)))
             if not parsed.score.is_finite():
