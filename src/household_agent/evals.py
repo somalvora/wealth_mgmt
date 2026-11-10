@@ -247,6 +247,7 @@ def evaluate(
     critic: Critic | None = None,
     authorizer_factory: Callable[[], Authorizer] = lambda: Authorizer(ACCOUNTS),
     embeddings: Embeddings | None = None,
+    progress: Callable[[int, int, Scenario], None] | None = None,
 ) -> EvalReport:
     router = router or Router()
     worlds: dict[str, Any] = {}  # built on first use, closed at the end
@@ -267,7 +268,9 @@ def evaluate(
     anomalies = anomaly_hits = per_txn_hits = false_alerts = 0
     recall_found = recall_total = cited_ok = supported = correct_total = 0
     exposures = controls = controls_ok = 0
-    for s in scenarios:
+    for i, s in enumerate(scenarios, 1):
+        if progress:
+            progress(i, len(scenarios), s)  # a slow hosted model otherwise looks like a hang
         counts[s.area] = counts.get(s.area, 0) + 1
         if s.area in ("routing", "adversarial"):
             decision, source = router(s.payload["request"])
@@ -429,7 +432,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     scenarios = generate_scenarios(args.seed)
     started = datetime.now(UTC)
-    report = evaluate(scenarios, router=router, generator=generator, critic=critic, embeddings=embeddings)
+    def show(i: int, n: int, s: Scenario) -> None:
+        secs = (datetime.now(UTC) - started).total_seconds()
+        print(f"[{secs:7.1f}s] {i}/{n} {s.area} {s.scenario_id}", file=sys.stderr, flush=True)
+
+    report = evaluate(scenarios, router=router, generator=generator, critic=critic, embeddings=embeddings,
+                      progress=show)
     print(f"{len(scenarios)} scenarios {report.counts} in {(datetime.now(UTC) - started).total_seconds():.1f}s")
     for g in report.gates:
         print(f"  {'PASS' if g.passed else 'FAIL'}  {g.name:<24} {g.value:.4f}  (target {g.target})")
