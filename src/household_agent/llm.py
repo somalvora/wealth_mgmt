@@ -49,6 +49,7 @@ ENV_CACHE = "HH_LLM_CACHE"
 DEFAULT_RPM = 10
 DEFAULT_CACHE = ".cache/llm.sqlite"
 HOSTED_MAX_RETRIES = 6  # 429s are retried with backoff
+HOSTED_TIMEOUT_S = 90  # one request that gets no answer fails (and is retried) instead of hanging the run
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ def get_chat_model(spec: str | None = None, *, temperature: float = 0.0) -> Base
             temperature=temperature,
             api_key=key,
             max_retries=HOSTED_MAX_RETRIES,
+            timeout=HOSTED_TIMEOUT_S,
             rate_limiter=_shared_limiter("groq"),
             cache=_cache(),
             # Qwen3 otherwise prefixes answers with <think>…</think>, which breaks JSON parsing
@@ -105,6 +107,7 @@ def get_chat_model(spec: str | None = None, *, temperature: float = 0.0) -> Base
             temperature=temperature,
             google_api_key=_gemini_key(s),
             max_retries=HOSTED_MAX_RETRIES,
+            timeout=HOSTED_TIMEOUT_S,
             rate_limiter=_shared_limiter("gemini"),
             cache=_cache(),
         )

@@ -255,7 +255,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_model_call_errors.py` | 6 | A model call that raises (dropped connection, API error) gives the critic no opinion and the generator template thoughts for every persona, both recorded with the error type only (never its message); a whole planning run survives a dead model; Ctrl-C is not swallowed; any ordinary error still yields one thought per persona and a score in [0, 1] (hypothesis) |
 
-Total: **603 passing**.
+| `test_request_timeout.py` | 5 | Hosted Gemini and Groq clients carry a finite per-request timeout (90 s), for every Gemini model, so one unanswered request fails and is retried instead of hanging a run |
+
+Total: **608 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
