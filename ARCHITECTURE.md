@@ -402,6 +402,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Cross-member leak | Deny-by-default and all-owner consent | `authz.py` |
 | Untraceable actions | Hash-chained audit log, `verify()` | `audit.py` |
 | LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step`; model thoughts with amount fields or currency in the rationale are rejected | `allocation.py`, `llm_planner.py` |
+| Model call fails (dropped connection, API error) | Treated like an unusable reply: template thoughts / critic no opinion, recorded with the error type only; the run continues |
 | Model persona output is malformed | Per-persona template fallback, recorded; rule-breaking thoughts hard-pruned, not repaired | `llm_planner.py`, `planning.py` |
 | Plan breaks caps or reserve | Hard prune before scoring; leaves must allocate exactly the surplus | `allocation.py`, `planning.py` |
 | Critic prunes a good branch | Critic is advisory; disagreement > 0.20 retains the branch for review | `planning.py` |
