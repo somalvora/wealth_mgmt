@@ -261,7 +261,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_router_call_errors.py` | 5 | A router model call that raises (dropped connection, API 500) falls back to the keyword rules and is recorded `rules_fallback`; the fallback still refuses money movement; Ctrl-C is not swallowed; no model still reports `rules`; any ordinary error gives the rules decision (hypothesis) |
 
-Total: **617 passing**.
+| `test_eval_preflight.py` | 7 | The eval CLI makes one real call per model first and stops with exit 2 naming the failing model by error type only (never the message); a dead model means nothing is evaluated; the report counts router fallbacks and the CLI prints a router/planner/critic fallback line; preflight reports exactly the failing checks (hypothesis) |
+
+Total: **624 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
