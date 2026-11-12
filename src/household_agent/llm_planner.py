@@ -164,8 +164,10 @@ class LLMCritic:
         self.model = model or get_chat_model()
         self.failures: list[dict[str, str]] = []
         self.reasons: dict[str, str] = {}
+        self.calls = 0  # model calls attempted; failures / calls is the share the eval's early-stop guard watches
 
     def score(self, inputs: PlanningInputs, node: PlanNode) -> Decimal:
+        self.calls += 1
         ask = {**_context(inputs, node), "node_id": node.node_id,
                "deterministic_scores": {"tax_efficiency": str(node.score.tax_efficiency),
                                         "liquidity_safety": str(node.score.liquidity_safety),

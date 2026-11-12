@@ -265,7 +265,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_eval_allocation_flag.py` | 5 | `--allocation-scenarios N` runs exactly N allocation scenarios (default 60); 0 skips them and the CLI prints a NOTE that the allocation gates are then vacuous; negative is rejected; count matches the request for any N (hypothesis) |
 
-Total: **629 passing**.
+| `test_eval_early_stop.py` | 7 | the eval aborts with exit 2 once more than 80% of at least 10 router (or planner-critic) model calls have fallen back; healthy models never abort; below the window nothing is judged; `--no-early-stop` and no guard run everything; message has counts only, no provider text; abort iff share > limit after window (hypothesis) |
+
+Total: **636 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 

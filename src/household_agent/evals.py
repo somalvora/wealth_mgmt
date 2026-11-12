@@ -239,6 +239,19 @@ def _allocation_failures(p: dict[str, Any], expected: dict[str, Any], generator:
     return problems, result.evaluations
 
 
+EARLY_STOP = (10, 0.8)  # (model calls before judging, fallback share above which the run aborts)
+
+
+class ModelUnhealthy(RuntimeError):
+    """A hosted model is mostly falling back to rules/templates, so the rest of the run would prove nothing."""
+
+
+def _check_health(name: str, bad: int, total: int, guard: tuple[int, float] | None) -> None:
+    window, share = guard or (0, 1.0)
+    if guard and total >= window and bad / total > share:
+        raise ModelUnhealthy(f"{name} fell back on {bad} of {total} model calls (limit {share:.0%} after {window} calls)")
+
+
 def evaluate(
     scenarios: Sequence[Scenario],
     *,
@@ -248,6 +261,7 @@ def evaluate(
     authorizer_factory: Callable[[], Authorizer] = lambda: Authorizer(ACCOUNTS),
     embeddings: Embeddings | None = None,
     progress: Callable[[int, int, Scenario], None] | None = None,
+    fallback_guard: tuple[int, float] | None = None,
 ) -> EvalReport:
     router = router or Router()
     worlds: dict[str, Any] = {}  # built on first use, closed at the end
@@ -277,6 +291,7 @@ def evaluate(
             if source != "rules":
                 model_calls += 1
                 schema_ok += source == "model"
+                _check_health("router", model_calls - schema_ok, model_calls, fallback_guard)
             if s.area == "routing":
                 e = s.expected
                 got = (decision.intent, sorted(d.agent for d in decision.dispatch_plan), decision.external_action_requested)
@@ -308,6 +323,8 @@ def evaluate(
             score("authorization", allowed == s.expected["allowed"], s, f"allowed={allowed}")
         elif s.area == "allocation":
             problems, evaluations = _allocation_failures(s.payload, s.expected, generator, critic)
+            if critic is not None and hasattr(critic, "failures"):
+                _check_health("planner critic", len(critic.failures), getattr(critic, "calls", 0), fallback_guard)
             max_evals = max(max_evals, evaluations)
             score("allocation", not problems, s, "; ".join(problems))
         elif s.area == "ingestion":
@@ -437,6 +454,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--allocation-scenarios", type=int, default=60, metavar="N",
                     help="how many allocation scenarios to run (default 60); with a hosted planner model each costs "
                          "~15-20 model calls, so 0 skips them and checks everything else")
+    ap.add_argument("--no-early-stop", action="store_true",
+                    help=f"keep going even when a model mostly falls back (default: abort with exit 2 once more than "
+                         f"{EARLY_STOP[1]:.0%} of at least {EARLY_STOP[0]} model calls have fallen back)")
     ap.add_argument("--out", help="write the JSON report here")
     args = ap.parse_args(argv)
 
@@ -473,8 +493,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         secs = (datetime.now(UTC) - started).total_seconds()
         print(f"[{secs:7.1f}s] {i}/{n} {s.area} {s.scenario_id}", file=sys.stderr, flush=True)
 
-    report = evaluate(scenarios, router=router, generator=generator, critic=critic, embeddings=embeddings,
-                      progress=show)
+    try:
+        report = evaluate(scenarios, router=router, generator=generator, critic=critic, embeddings=embeddings,
+                          progress=show, fallback_guard=None if args.no_early_stop else EARLY_STOP)
+    except ModelUnhealthy as e:  # counts only, never the provider's message
+        print(f"aborted early, the model is not answering usefully: {e}. Check quota/model name, "
+              f"or pass --no-early-stop to run anyway.", file=sys.stderr)
+        return 2
     print(f"{len(scenarios)} scenarios {report.counts} in {(datetime.now(UTC) - started).total_seconds():.1f}s")
     for g in report.gates:
         print(f"  {'PASS' if g.passed else 'FAIL'}  {g.name:<24} {g.value:.4f}  (target {g.target})")
