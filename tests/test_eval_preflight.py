@@ -32,7 +32,7 @@ def test_cli_stops_before_evaluating_when_a_model_is_dead(monkeypatch, capsys):
 
 def test_cli_runs_when_the_model_answers(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(llm, "get_chat_model", lambda spec, **kw: FakeListChatModel(responses=["ok"]))
-    main(["--model", "fake:m", "--out", str(tmp_path / "r.json")])
+    main(["--model", "fake:m", "--no-early-stop", "--out", str(tmp_path / "r.json")])
     out = capsys.readouterr().out
     assert "model fallbacks" in out and "router" in out
 
