@@ -263,7 +263,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_eval_preflight.py` | 7 | The eval CLI makes one real call per model first and stops with exit 2 naming the failing model by error type only (never the message); a dead model means nothing is evaluated; the report counts router fallbacks and the CLI prints a router/planner/critic fallback line; preflight reports exactly the failing checks (hypothesis) |
 
-Total: **624 passing**.
+| `test_eval_allocation_flag.py` | 5 | `--allocation-scenarios N` runs exactly N allocation scenarios (default 60); 0 skips them and the CLI prints a NOTE that the allocation gates are then vacuous; negative is rejected; count matches the request for any N (hypothesis) |
+
+Total: **629 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
