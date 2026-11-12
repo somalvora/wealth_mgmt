@@ -434,6 +434,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--embed-model", help="embedding model spec for retrieval, e.g. ollama:nomic-embed-text "
                                           "(default: offline hash embeddings)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--allocation-scenarios", type=int, default=60, metavar="N",
+                    help="how many allocation scenarios to run (default 60); with a hosted planner model each costs "
+                         "~15-20 model calls, so 0 skips them and checks everything else")
     ap.add_argument("--out", help="write the JSON report here")
     args = ap.parse_args(argv)
 
@@ -462,7 +465,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("preflight failed, nothing was evaluated: " + "; ".join(problems), file=sys.stderr)
         return 2
 
-    scenarios = generate_scenarios(args.seed)
+    if args.allocation_scenarios < 0:
+        ap.error("--allocation-scenarios must be 0 or more")
+    scenarios = generate_scenarios(args.seed, n_allocation=args.allocation_scenarios)
     started = datetime.now(UTC)
     def show(i: int, n: int, s: Scenario) -> None:
         secs = (datetime.now(UTC) - started).total_seconds()
@@ -474,6 +479,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for g in report.gates:
         print(f"  {'PASS' if g.passed else 'FAIL'}  {g.name:<24} {g.value:.4f}  (target {g.target})")
     print(f"  not covered yet: {', '.join(report.not_covered)}")
+    if not report.counts.get("allocation"):  # the allocation gates above pass with nothing tested
+        print("  NOTE: no allocation scenarios were run, so allocation_invariants and max_node_evaluations "
+              "are vacuous and the planner model was not exercised")
     if checks:
         print("  " + fallback_summary(report, generator, critic))
     if args.out:
