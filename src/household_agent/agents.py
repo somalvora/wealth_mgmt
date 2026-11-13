@@ -186,7 +186,14 @@ ROUTER_PROMPT = (
     '{"intent": one of historical_comparison | tax_context | historical_comparison_and_tax_context | '
     'allocation_planning | out_of_scope, "dispatch_plan": [{"agent": "ledger_analyst" | '
     '"policy_compliance", "task": "...", "inputs": {}}], "external_action_requested": bool, '
-    '"approval_required": bool}. Never plan payments, transfers or other external actions.'
+    '"approval_required": bool}. Never plan payments, transfers or other external actions. Intents: '
+    "historical_comparison = questions about past spending or transactions (dispatch ledger_analyst only); "
+    "tax_context = questions about tax rules, deductibility, leases, HOA or insurance policy (dispatch "
+    "policy_compliance only, never out_of_scope); historical_comparison_and_tax_context = both a past-spending "
+    "comparison and a tax/policy question (dispatch both agents); allocation_planning = how to use surplus "
+    "money, savings or investments (empty dispatch_plan, because a separate planner handles it, and "
+    "approval_required true); out_of_scope = anything unrelated to household finance (empty dispatch_plan). "
+    "Set external_action_requested true only if the request asks you to pay, transfer or wire money."
 )
 LEDGER_PROMPT = (
     "You are the Ledger Analyst. Use query_ledger to find transactions and run_calculation for every "
