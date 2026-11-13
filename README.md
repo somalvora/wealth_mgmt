@@ -267,7 +267,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_eval_early_stop.py` | 7 | the eval aborts with exit 2 once more than 80% of at least 10 router (or planner-critic) model calls have fallen back; healthy models never abort; below the window nothing is judged; `--no-early-stop` and no guard run everything; message has counts only, no provider text; abort iff share > limit after window (hypothesis) |
 
-Total: **636 passing**.
+| `test_router_prompt.py` | 4 | the router prompt defines every model-chosen intent (tax questions never out_of_scope, allocation has an empty dispatch and approval required), hides statement_ingestion, and still forbids external actions |
+
+Total: **640 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
