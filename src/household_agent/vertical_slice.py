@@ -237,6 +237,15 @@ class _Env:
         return cls(workdir, conn, store, consent, CalculationRunner(store))
 
 
+def _why(result: AgentResult) -> str:
+    """Why a specialist did not complete: its first error, first line only and capped, so a small live model's
+    failure (a timeout, a bad tool call, unparseable JSON) shows in the report instead of just ``failed``."""
+    if result.status == "completed" or not result.errors:
+        return ""
+    first = str(result.errors[0]).splitlines()[0] if str(result.errors[0]) else ""
+    return f" ({first[:160]})"
+
+
 def _planner_kwargs() -> dict[str, Any]:
     d = demo_planning_inputs()
     return {"contribution_room_minor": d.contribution_room_minor, "limits_evidence_id": d.limits_evidence_id,
@@ -317,7 +326,7 @@ def run_vertical_slice(
           and sup_actions[:1] == ["route"] and sup_actions.count("dispatch") == 2
           and sup_actions[-1] == "compose_briefing" and all(s["evidence_ids"] for s in statements),
           f"{mode}; intent={job.get('routing', {}).get('intent')}; "
-          + "; ".join(f"{r.agent}={r.status}" for r in results) + f"; supervisor steps={sup_actions}",
+          + "; ".join(f"{r.agent}={r.status}" + _why(r) for r in results) + f"; supervisor steps={sup_actions}",
           [calc_run_id, *(i for r in results for i in r.evidence_ids)])
 
     # 4. provenance: calculation -> transactions -> source documents (hashes) -> audit events
