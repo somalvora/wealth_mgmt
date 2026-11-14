@@ -65,7 +65,10 @@ _ERROR_TYPES: tuple[tuple[type[BaseException], str], ...] = (
 def _error(exc: BaseException) -> dict[str, Any]:
     kind = next(name for t, name in _ERROR_TYPES if isinstance(exc, t))
     message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
-    return {"ok": False, "error": {"type": kind, "message": str(message)}}
+    message = str(message)
+    if kind == "authorization_denied" and message.startswith("unknown account"):
+        message += "; call list_accounts for the account ids you may read"  # a model guessed an id it never saw
+    return {"ok": False, "error": {"type": kind, "message": message}}
 
 
 def _txn_view(t: Transaction) -> dict[str, Any]:

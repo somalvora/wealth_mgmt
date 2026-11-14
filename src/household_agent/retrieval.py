@@ -145,7 +145,7 @@ class RetrievalService:
 
     def _collection(self, household_id: str, name: str):
         if name not in COLLECTIONS:
-            raise RetrievalRequestError(f"unknown collection {name!r}")
+            raise RetrievalRequestError(f"unknown collection {name!r}; use one of {', '.join(COLLECTIONS)}")
         return self.client.get_or_create_collection(
             f"{household_id}__{name}", embedding_function=None, configuration={"hnsw": {"space": "cosine"}}
         )
