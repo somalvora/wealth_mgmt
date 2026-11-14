@@ -461,7 +461,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "5); gates for the other areas are then not meaningful")
     ap.add_argument("--no-early-stop", action="store_true",
                     help=f"keep going even when a model mostly falls back (default: abort with exit 2 once more than "
-                         f"{EARLY_STOP[1]:.0%} of at least {EARLY_STOP[0]} model calls have fallen back)")
+                         f"{EARLY_STOP[1]:.0%}% of at least {EARLY_STOP[0]} model calls have fallen back)")
     ap.add_argument("--out", help="write the JSON report here")
     args = ap.parse_args(argv)
 

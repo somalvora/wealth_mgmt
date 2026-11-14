@@ -47,6 +47,12 @@ def test_only_area_runs_just_that_area(monkeypatch, capsys, tmp_path):
     assert json.loads(out_file.read_text())["counts"] == {"allocation": 2}
 
 
+def test_help_prints_instead_of_crashing(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0 and "--only-area" in capsys.readouterr().out
+
+
 def test_only_area_rejects_an_unknown_area():
     with pytest.raises(SystemExit):
         main(["--only-area", "nonsense"])
