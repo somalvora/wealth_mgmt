@@ -58,6 +58,17 @@ def test_only_area_rejects_an_unknown_area():
         main(["--only-area", "nonsense"])
 
 
+def test_out_report_records_why_the_planner_fell_back(monkeypatch, tmp_path):
+    import json
+    monkeypatch.setattr(llm, "get_chat_model", lambda spec, **kw: FakeListChatModel(responses=["not json"]))
+    out_file = tmp_path / "r.json"
+    main(["--model", "fake:m", "--planner-model", "fake:p", "--no-early-stop", "--only-area", "allocation",
+          "--allocation-scenarios", "6", "--out", str(out_file)])
+    fb = json.loads(out_file.read_text())["model_fallbacks"]
+    assert fb["planner_thoughts"] and {"node_id", "tier", "persona", "reason"} <= set(fb["planner_thoughts"][0])
+    assert "unparseable reply" in fb["planner_thoughts"][0]["reason"]
+
+
 def test_report_counts_router_fallbacks():
     from household_agent.agents import Router
     scenarios = [s for s in generate_scenarios(0) if s.area == "routing"][:6]

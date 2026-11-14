@@ -519,8 +519,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if checks:
         print("  " + fallback_summary(report, generator, critic))
     if args.out:
+        data = json.loads(report.to_json())
+        if checks:  # why each model call fell back (error types and validation messages, never provider text)
+            data["model_fallbacks"] = {
+                "planner_thoughts": generator.fallbacks if generator is not None else [],
+                "critic_calls": critic.calls if critic is not None else 0,
+                "critic_failures": critic.failures if critic is not None else []}
         with open(args.out, "w") as fh:
-            fh.write(report.to_json())
+            json.dump(data, fh, indent=2)
     return 0 if report.passed else 1
 
 
