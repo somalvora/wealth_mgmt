@@ -37,6 +37,21 @@ def test_cli_runs_when_the_model_answers(monkeypatch, capsys, tmp_path):
     assert "model fallbacks" in out and "router" in out
 
 
+def test_only_area_runs_just_that_area(monkeypatch, capsys, tmp_path):
+    import json
+    monkeypatch.setattr(llm, "get_chat_model", lambda spec, **kw: FakeListChatModel(responses=["ok"]))
+    out_file = tmp_path / "r.json"
+    main(["--model", "fake:m", "--no-early-stop", "--only-area", "allocation", "--allocation-scenarios", "2",
+          "--out", str(out_file)])
+    assert "only the allocation area was run (2 scenarios)" in capsys.readouterr().err
+    assert json.loads(out_file.read_text())["counts"] == {"allocation": 2}
+
+
+def test_only_area_rejects_an_unknown_area():
+    with pytest.raises(SystemExit):
+        main(["--only-area", "nonsense"])
+
+
 def test_report_counts_router_fallbacks():
     from household_agent.agents import Router
     scenarios = [s for s in generate_scenarios(0) if s.area == "routing"][:6]
