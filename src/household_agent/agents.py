@@ -224,7 +224,8 @@ def _fn(name: str, description: str, properties: dict[str, Any], required: list[
 _STR_LIST = {"type": "array", "items": {"type": "string"}}
 LEDGER_TOOLS = [
     _fn("list_accounts", "Accounts you may read for this task.", {}, []),
-    _fn("query_ledger", "Transactions in [start, end] (ISO dates) for accounts.",
+    _fn("query_ledger", "Transactions in [start, end] (ISO dates) for accounts. account_ids must be ids returned "
+                        "by list_accounts (like acct_alex_checking), never a topic such as taxes.",
         {"account_ids": _STR_LIST, "start": {"type": "string"}, "end": {"type": "string"},
          "merchant": {"type": "string"}, "include_provisional": {"type": "boolean"}},
         ["account_ids", "start", "end"]),
@@ -236,8 +237,10 @@ LEDGER_TOOLS = [
 ]
 LEDGER_READ_TOOLS = [t for t in LEDGER_TOOLS if t["function"]["name"] != "ingest_statement"]
 POLICY_TOOLS = [
-    _fn("retrieve_verified", "Search authorized, verified sources.",
-        {"query": {"type": "string"}, "collections": _STR_LIST, "tax_years": {"type": "array", "items": {"type": "integer"}},
+    _fn("retrieve_verified", "Search authorized, verified sources. Leave collections out to search all of them; "
+                             "if you set it, use only: " + ", ".join(COLLECTIONS) + ".",
+        {"query": {"type": "string"},
+         "collections": {"type": "array", "items": {"type": "string", "enum": list(COLLECTIONS)}}, "tax_years": {"type": "array", "items": {"type": "integer"}},
          "jurisdictions": _STR_LIST, "statement_periods": _STR_LIST}, ["query"]),
 ]
 
