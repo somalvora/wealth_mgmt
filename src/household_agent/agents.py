@@ -202,7 +202,7 @@ LEDGER_PROMPT = (
     "treatment. Your tool budget is small (tool_budget in the task): filter query_ledger by merchant and "
     "by the months the task names (a month or 'last year' without a year is relative to today in the "
     "task) rather than widening the date range and repeating it, then pass the transaction IDs you found "
-    "to run_calculation. Call list_accounts only if the task names no account. A claim with a computed "
+    "to run_calculation. account_ids must come from readable_accounts in the task inputs (or list_accounts if absent); never invent one. A claim with a computed "
     "number (a difference, percentage or total) must cite the run_id from run_calculation, not just the "
     "transactions. " + _JSON_RULE
 )
@@ -445,6 +445,8 @@ class LedgerAnalyst:
                               restrict_ingest=True,
                               ingest_csv_sha256=hashlib.sha256(csv_text.encode()).hexdigest()
                               if ingesting and isinstance(csv_text, str) else None)
+        if not ingesting:  # a small model guesses account ids; hand it the real ones instead of a tool call
+            a = a.model_copy(update={"inputs": {**a.inputs, "readable_accounts": session.readable_accounts()}})
         loop = run_react(self.model, LEDGER_PROMPT, a, LEDGER_TOOLS if ingesting else LEDGER_READ_TOOLS,
                          session.call, self.clock().date())
         evidence: dict[str, Any] = {}

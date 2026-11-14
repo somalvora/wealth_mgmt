@@ -273,7 +273,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_tool_hints.py` | 5 | an unknown-account denial tells the model to call `list_accounts` (other denials do not); a topic used as an account id gets the hint; an unknown retrieval collection error lists the valid ones, for any name (hypothesis) |
 
-Total: **650 passing**.
+| `test_readable_accounts.py` | 5 | `readable_accounts()` equals `list_accounts`, charges no tool budget, is empty for a dependent, hides Alex's checking from Jordan; the ledger analyst's first message carries `readable_accounts` |
+
+Total: **656 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
