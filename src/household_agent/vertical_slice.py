@@ -240,10 +240,10 @@ class _Env:
 def _why(result: AgentResult) -> str:
     """Why a specialist did not complete: its first error, first line only and capped, so a small live model's
     failure (a timeout, a bad tool call, unparseable JSON) shows in the report instead of just ``failed``."""
-    if result.status == "completed" or not result.errors:
+    reasons = [str(r) for r in (*result.errors, *result.questions) if str(r)]  # errors first, then open questions
+    if result.status == "completed" or not reasons:
         return ""
-    first = str(result.errors[0]).splitlines()[0] if str(result.errors[0]) else ""
-    return f" ({first[:160]})"
+    return f" ({reasons[0].splitlines()[0][:160]})"
 
 
 def _planner_kwargs() -> dict[str, Any]:
