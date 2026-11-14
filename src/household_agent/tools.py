@@ -144,17 +144,17 @@ class ToolSession:
 
     # --- tools ---------------------------------------------------------------------
 
+    def readable_accounts(self) -> list[dict[str, Any]]:
+        """Accounts the actor may read for this session's purpose (checks are not audited, no budget charged)."""
+        at = self.clock()
+        return [
+            {"account_id": a.account_id, "kind": a.kind, "owner_scope": a.owner_scope.value}
+            for a in self.store.authorizer.accounts(self.actor.household_id)
+            if self.store.authorizer.authorize(self.actor, a.account_id, Action.READ, self.purpose, at)
+        ]
+
     def list_accounts(self) -> dict[str, Any]:
-        """Accounts the actor may read for this session's purpose (checks are not audited)."""
-        def run() -> dict[str, Any]:
-            at = self.clock()
-            accounts = [
-                {"account_id": a.account_id, "kind": a.kind, "owner_scope": a.owner_scope.value}
-                for a in self.store.authorizer.accounts(self.actor.household_id)
-                if self.store.authorizer.authorize(self.actor, a.account_id, Action.READ, self.purpose, at)
-            ]
-            return {"accounts": accounts}
-        return self._guard(run)
+        return self._guard(lambda: {"accounts": self.readable_accounts()})
 
     def query_ledger(
         self, account_ids: list[str], start: str, end: str,

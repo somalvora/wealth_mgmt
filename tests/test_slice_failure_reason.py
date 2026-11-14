@@ -41,3 +41,9 @@ def test_a_crashing_specialist_model_shows_its_error_in_the_trace_detail(tmp_pat
 def test_property_reason_is_one_short_line(msg):
     why = _why(_result(errors=[msg]))
     assert "\n" not in why and len(why) <= 160 + 3
+
+
+def test_a_needs_review_without_errors_shows_its_first_question():
+    r = AgentResult(task_id="t", correlation_id="c", agent="policy_compliance", status="needs_review",
+                    questions=["Which tax year applies?\nmore"])
+    assert _why(r) == " (Which tax year applies?)"
