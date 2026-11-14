@@ -269,7 +269,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_router_prompt.py` | 4 | the router prompt defines every model-chosen intent (tax questions never out_of_scope, allocation has an empty dispatch and approval required), hides statement_ingestion, and still forbids external actions |
 
-Total: **640 passing**.
+| `test_slice_failure_reason.py` | 5 | the vertical-slice trace detail shows a failed specialist's first error line (capped at 160 chars), nothing for completed or error-less results; a crashing live model shows its error; reason is always one short line (hypothesis) |
+
+Total: **645 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
