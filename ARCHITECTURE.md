@@ -338,7 +338,7 @@ Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded pl
 | Check | What it does | Passes when |
 |---|---|---|
 | `ingest_and_reconcile` | Each owner uploads their statements | 3 reconciled, Jordan's card qualified, September unreconciled |
-| `three_agent_trace` | `Supervisor.run` on the §9 question | Both specialists ran, a calc run exists, audit shows route → 2 dispatches → compose |
+| `three_agent_trace` | `Supervisor.run` on the §9 question | Both specialists ran, a calc run exists, audit shows route → 2 dispatches → compose. A failed specialist is reported with its first error line, e.g. `ledger_analyst=failed (TimeoutError: …)`; one failure here also fails `provenance_chain`, `draft_briefing` and `audit_trail` |
 | `provenance_chain` | Follows `calculation_runs.input_ids_json` → `transactions.source_document_id` → `documents.source_hash` | Every link exists, and `ingest_document` and `calculate` events share the job's correlation ID |
 | `authorization_denial` | Jordan reads Alex's checking; Sam indexes a document | Both refused, the deny is audited |
 | `consent_revocation_denial` | Both owners grant the CPA rental access via `ConsentStore`, then Jordan revokes | The read succeeds before and is refused after |
