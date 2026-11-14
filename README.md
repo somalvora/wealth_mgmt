@@ -271,7 +271,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_slice_failure_reason.py` | 5 | the vertical-slice trace detail shows a failed specialist's first error line (capped at 160 chars), nothing for completed or error-less results; a crashing live model shows its error; reason is always one short line (hypothesis) |
 
-Total: **645 passing**.
+| `test_tool_hints.py` | 5 | an unknown-account denial tells the model to call `list_accounts` (other denials do not); a topic used as an account id gets the hint; an unknown retrieval collection error lists the valid ones, for any name (hypothesis) |
+
+Total: **650 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
