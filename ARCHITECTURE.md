@@ -352,6 +352,8 @@ Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded pl
 | `no_external_actions` | Transfer request; inspect the tool names | `refused`; no tool name matches pay/transfer/wire |
 | `audit_trail` | `AuditLog.verify()` | Chain intact and every stage appears under the job's correlation ID |
 
+**Self-correcting tool errors.** Live models guess identifiers they never saw (account `taxes`, collection `Internal Revenue Code`) and then burn the tool budget retrying. So the tool descriptions say where valid values come from (`query_ledger`: ids from `list_accounts`; `retrieve_verified`: `collections` is an enum of `COLLECTIONS`), and the errors name the fix: an unknown-account denial appends "call list_accounts for the account ids you may read", and an unknown collection lists the valid ones. Before this, Qwen2.5-3B and Gemma both failed the four cascading gates; with it Gemma passes all 14.
+
 `models(role)` selects the chat model for `router`, `ledger_analyst` and `policy_compliance`. If no factory is given, the specialists use `PlaybackChatModel` scripts. These read real IDs from earlier tool results, so the scripts never hard-code an ID, and the router uses keyword rules. A model that misbehaves makes its own checks fail, while the guardrail checks keep passing; tests cover both cases.
 
 ## 5. Storage schema (SQLite)
