@@ -225,7 +225,7 @@ _STR_LIST = {"type": "array", "items": {"type": "string"}}
 LEDGER_TOOLS = [
     _fn("list_accounts", "Accounts you may read for this task.", {}, []),
     _fn("query_ledger", "Transactions in [start, end] (ISO dates) for accounts. account_ids must be ids returned "
-                        "by list_accounts (like acct_alex_checking), never a topic such as taxes.",
+                        "by list_accounts (shaped like acct_<owner>_<kind>), never a topic such as taxes.",
         {"account_ids": _STR_LIST, "start": {"type": "string"}, "end": {"type": "string"},
          "merchant": {"type": "string"}, "include_provisional": {"type": "boolean"}},
         ["account_ids", "start", "end"]),
