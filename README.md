@@ -11,7 +11,7 @@ The design is the single source of truth:
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
 | 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs, model planner personas, monthly briefing, eval harness and §12 vertical slice done |
-| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **In progress**: 321-scenario eval harness scores 13 gates (all design §2 metrics except membership inference) and the draft monthly briefing is in; hardening and real-model eval numbers remain |
+| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **In progress**: 321-scenario eval harness scores 13 gates (all design §2 metrics except membership inference) and the draft monthly briefing is in; first real-model numbers are in (routing ~0.98 on Gemma; slice 14/14 on Gemma and Qwen2.5-3B); real-model allocation scenarios and hardening remain |
 
 What's in Phase 1:
 
@@ -325,7 +325,7 @@ These parts of the design are not implemented yet:
 - **Encryption at rest and per-household keys.** The SQLite database is plaintext. Use synthetic data only.
 - **Statement formats.** CSV and text-based PDF statements are supported (see below). **OCR is not built**: a scanned PDF with no text layer is rejected. The agent's `ingest_statement` tool still takes CSV text only; PDFs go in through `pipeline.ingest_statement`/`ingest_file`.
 - **Reviewer override.** A reviewer can't yet mark a `qualified` statement as confirmed.
-- **Agents and orchestration.** The Supervisor and both specialists run end to end in `vertical_slice`, but only with offline playback models so far; a real-model run on the Ollama machine is still needed. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
+- **Agents and orchestration.** The Supervisor and both specialists run end to end in `vertical_slice` and pass the vertical slice with live models (Gemma 4 26B hosted, Qwen2.5-3B on Ollama); the offline tests use playback models. Retrieval uses word-based chunking (words approximate tokens) and a regex injection detector. Accounts and members for the MCP server still come from the synthetic household.
 - **Planner inputs.**
   - Planner inputs are synthetic. Contribution room values are placeholders, not IRS limits.
   - Planning inputs are derived from the ledger (`plan_inputs.py`), but the demo's step 5 still uses the fixed synthetic inputs. Contribution room and return assumptions are still passed in rather than retrieved.
@@ -337,7 +337,7 @@ These parts of the design are not implemented yet:
   - The eval set is template-generated, not a human-labeled held-out set.
   - Membership inference is not scored (no fine-tuned model). The canary test covers runtime surfaces only.
   - Retrieval eval numbers use offline hash embeddings; `nomic-embed-text` numbers need the Ollama machine.
-  - Real-model eval numbers still need a run, either with Gemini (`GEMINI_API_KEY`), Groq or on the Ollama machine. The hosted clients are tested only offline so far; tool calling has not been checked against the live APIs.
+  - Real-model results so far (synthetic data): with Gemma 4 26B (hosted) the eval's router routing accuracy is about 0.98 (0.73 before the router prompt defined each intent) and `schema_validity` is 0.9855, just under the 0.99 gate; the live vertical slice passes 14/14 on Gemma 4 26B and on Qwen2.5-3B-Instruct (Ollama, CPU). Still not run on a real model: allocation scenarios (`--allocation-scenarios` defaults to 60 and costs about 15-20 model calls each) and Gemini Flash (free quota is about 20 requests a day). Run `python -m household_agent.evals --model <spec> --planner-model <spec> --allocation-scenarios 5` to try them.
 
 ## Data policy
 
