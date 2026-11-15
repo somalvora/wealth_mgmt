@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Household wealth agent — demo</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --mute:#667085; --line:#e3e7ee; --accent:#2457d6;
+          --ok:#14804a; --bad:#b42318; --warn:#9a6700; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:12px 20px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; }
+  header h1 { font-size:16px; margin:0; }
+  header .tag { color:var(--mute); font-size:12px; }
+  main { display:grid; grid-template-columns: minmax(0,1.5fr) minmax(320px,1fr); gap:16px; padding:16px; height:calc(100vh - 54px); }
+  .col { display:flex; flex-direction:column; gap:12px; min-height:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mute); margin:0 0 8px; }
+  #chat { flex:1; min-height:0; display:flex; flex-direction:column; }
+  #log { flex:1; overflow:auto; display:flex; flex-direction:column; gap:10px; padding:4px; }
+  .msg { max-width:88%; padding:8px 12px; border-radius:10px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .me { align-self:flex-end; background:var(--accent); color:#fff; }
+  .bot { align-self:flex-start; background:#eef1f6; }
+  .bot .cite { display:block; color:var(--mute); font-size:11px; margin-top:2px; }
+  .note { color:var(--warn); }
+  form { display:flex; gap:8px; margin-top:8px; }
+  input[type=text] { flex:1; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  button, select { font:inherit; padding:7px 12px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { font-size:12px; padding:4px 9px; border-radius:99px; background:#fff; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .pill { padding:1px 8px; border-radius:99px; font-size:11px; font-weight:600; }
+  .reconciled { background:#dcf5e7; color:var(--ok); } .qualified { background:#fff3cf; color:var(--warn); }
+  .unreconciled, .rejected, .refused, .deny { background:#fde4e1; color:var(--bad); }
+  .allow, .info { background:#e8eefc; color:var(--accent); }
+  .duplicate { background:#eee; color:var(--mute); }
+  .doc, .ev { display:flex; gap:8px; align-items:baseline; padding:4px 0; border-top:1px solid var(--line); font-size:13px; }
+  .doc:first-of-type, .ev:first-of-type { border-top:0; }
+  .doc .n { flex:1; overflow-wrap:anywhere; } .mute { color:var(--mute); font-size:12px; }
+  #trace { overflow:auto; max-height:260px; }
+  .sample { display:flex; gap:8px; align-items:center; padding:4px 0; border-top:1px solid var(--line); }
+  .sample .d { flex:1; font-size:12px; }
+  .plan { background:#f3f6ff; border:1px solid #cfdcfa; border-radius:8px; padding:8px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Household wealth agent</h1>
+  <span class="tag" id="model"></span>
+  <span class="tag">synthetic data only · the system drafts, it never moves money</span>
+</header>
+<main>
+  <section class="col">
+    <div class="card" id="chat">
+      <h2>Ask</h2>
+      <div id="log"></div>
+      <div class="chips" id="chips"></div>
+      <form id="form">
+        <input type="text" id="msg" placeholder="Ask about the household's money…" autocomplete="off" maxlength="2000">
+        <button class="primary" id="send">Send</button>
+      </form>
+    </div>
+  </section>
+  <aside class="col" style="overflow:auto">
+    <div class="card">
+      <h2>You are</h2>
+      <div class="row"><select id="member"></select><span class="mute" id="role"></span></div>
+    </div>
+    <div class="card">
+      <h2>Upload a statement (PDF or CSV)</h2>
+      <input type="file" id="file" accept=".pdf,.csv,application/pdf">
+      <button id="up">Upload</button>
+      <div class="mute" style="margin-top:6px">Or try a generated sample:</div>
+      <div id="samples"></div>
+    </div>
+    <div class="card"><h2>Documents on file</h2><div id="docs"></div></div>
+    <div class="card"><h2>What the agents did</h2><div id="trace" class="mute">Nothing yet.</div></div>
+    <div class="card">
+      <h2>Audit trail</h2>
+      <div class="row"><button id="verify">Verify chain</button><span id="audit" class="mute"></span></div>
+    </div>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let state = null, busy = false;
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function pill(text, cls) { return el('span', 'pill ' + cls, text); }
+async function api(path, opts) {
+  const r = await fetch(path, opts); let body = null;
+  try { body = await r.json(); } catch (_) { body = { detail: r.statusText }; }
+  return { ok: r.ok, status: r.status, body };
+}
+function say(who, text, extra) {
+  const m = el('div', 'msg ' + who, text); if (extra) extra(m);
+  $('log').appendChild(m); $('log').scrollTop = $('log').scrollHeight; return m;
+}
+
+function renderDocs() {
+  const box = $('docs'); box.replaceChildren();
+  if (!state.documents.length) box.appendChild(el('div', 'mute', 'None yet.'));
+  state.documents.forEach(d => {
+    const r = el('div', 'doc'); r.appendChild(el('span', 'n', d.name)); r.appendChild(pill(d.outcome, d.outcome));
+    if (d.issues && d.issues.length) r.appendChild(el('span', 'mute', d.issues.map(i => i.code).join(', ')));
+    box.appendChild(r);
+  });
+}
+function renderTrace(events) {
+  const box = $('trace'); box.replaceChildren();
+  if (!events.length) { box.textContent = 'Nothing yet.'; return; }
+  events.forEach(e => {
+    const r = el('div', 'ev'); r.appendChild(pill(e.decision, e.decision));
+    r.appendChild(el('span', null, `${e.agent} · ${e.action}` + (e.resource ? ` · ${e.resource}` : '')));
+    if (e.reason) r.appendChild(el('span', 'mute', e.reason));
+    box.appendChild(r);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderApproval(a, host) {
+  const plan = el('div', 'plan');
+  const p = a.plan || {};
+  plan.appendChild(el('div', null, `Plan: ${p.message || p.status || a.status}`));
+  const alloc = p.allocation_minor || {};
+  Object.keys(alloc).forEach(k => plan.appendChild(el('div', 'mute', `${k}: $${(alloc[k] / 100).toLocaleString(undefined, {minimumFractionDigits: 2})}`)));
+  const status = el('div', null, `Status: ${a.status}`); plan.appendChild(status);
+  if (a.status === 'awaiting_approval') {
+    const row = el('div', 'row');
+    const who = el('select');
+    state.members.forEach(m => { const o = el('option', null, `${m.id} (${m.role})`); o.value = m.id; who.appendChild(o); });
+    const yes = el('button', 'primary', 'Approve'), no = el('button', null, 'Reject');
+    const act = async approved => {
+      const r = await api('/api/approve', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ thread_id: a.thread_id, approver: who.value, approved }) });
+      const b = r.body;
+      if (!r.ok) { status.textContent = 'Error: ' + (typeof b.detail === 'string' ? b.detail : 'request failed'); return; }
+      status.textContent = b.refused ? `Refused: ${b.reason}` : `Status: ${b.status}`;
+      if (!b.refused) { yes.disabled = no.disabled = who.disabled = true; }
+      refreshTrace(a.thread_id);
+    };
+    yes.onclick = () => act(true); no.onclick = () => act(false);
+    row.append(who, yes, no); plan.appendChild(row);
+    plan.appendChild(el('div', 'mute', 'Try approving as sam (a dependent) first: the system refuses.'));
+  }
+  host.appendChild(plan);
+}
+async function refreshTrace(corr) {
+  const r = await api('/api/trace/' + encodeURIComponent(corr)); if (r.ok) renderTrace(r.body.trace);
+}
+
+async function send(text) {
+  if (busy || !text.trim()) return;
+  busy = true; $('send').disabled = true;
+  say('me', text); $('msg').value = '';
+  const wait = say('bot', 'Working…');
+  const corr = 'corr_ui_' + Math.random().toString(36).slice(2, 12);
+  const poll = setInterval(() => refreshTrace(corr), 1200);
+  let r;
+  try {
+    r = await api('/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ member: $('member').value, message: text, correlation_id: corr }) });
+  } catch (e) { r = { ok: false, body: { detail: 'could not reach the server' } }; }
+  finally { clearInterval(poll); wait.remove(); }
+  if (!r.ok) { say('bot', 'Error: ' + (typeof r.body.detail === 'string' ? r.body.detail : JSON.stringify(r.body.detail))); }
+  else {
+    const b = r.body;
+    renderTrace(b.trace);
+    const failed = b.agents.filter(a => a.status === 'failed');
+    if (b.status === 'refused') say('bot', 'Refused: the system only drafts and never moves money.');
+    b.statements.forEach(s => say('bot', s.text, m => m.appendChild(el('span', 'cite', `${s.agent} · evidence ${s.evidence_ids.join(', ')}`))));
+    b.alerts.forEach(a => say('bot', a.text, m => m.classList.add('note')));
+    b.questions.forEach(q => say('bot', q, m => m.classList.add('note')));
+    failed.forEach(a => say('bot', `${a.agent} failed: ${a.errors[0] || 'unknown'}`, m => m.classList.add('note')));
+    if (b.approval) say('bot', 'I drafted an allocation plan. It needs a household adult to approve it.', m => renderApproval(b.approval, m));
+    if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !failed.length)
+      say('bot', `Done (${b.status}), nothing to report.`);
+  }
+  busy = false; $('send').disabled = false;
+}
+
+async function upload(name, blob) {
+  const fd = new FormData(); fd.append('member', $('member').value); fd.append('file', blob, name);
+  const r = await api('/api/upload', { method: 'POST', body: fd });
+  const b = r.body;
+  const text = b.reason ? `${name}: ${b.outcome} — ${b.reason}` : `${name}: ${b.outcome}` + ((b.issues || []).length ? ` (${b.issues.map(i => i.message).join('; ')})` : '');
+  say('bot', text, m => m.classList.add(b.outcome === 'reconciled' ? 'bot' : 'note'));
+  if (r.ok) { state.documents.push(b); renderDocs(); }
+}
+
+async function init() {
+  state = (await api('/api/state')).body;
+  $('model').textContent = 'model: ' + state.model;
+  state.members.forEach(m => { const o = el('option', null, m.id); o.value = m.id; $('member').appendChild(o); });
+  const roleOf = () => state.members.find(m => m.id === $('member').value).role;
+  $('role').textContent = roleOf(); $('member').onchange = () => $('role').textContent = roleOf();
+  state.suggestions.forEach(s => { const c = el('button', 'chip', s.text.length > 70 ? s.text.slice(0, 67) + '…' : s.text);
+    c.title = s.text; c.onclick = () => { $('member').value = s.member; $('msg').value = s.text; $('msg').focus(); }; $('chips').appendChild(c); });
+  state.samples.forEach(s => {
+    const r = el('div', 'sample'), d = el('div', 'd', s.description); d.appendChild(el('div', 'mute', 'expect: ' + s.expect));
+    const b = el('button', null, 'Upload'); b.onclick = async () => { $('member').value = s.member;
+      upload(s.name, await (await fetch('/api/samples/' + encodeURIComponent(s.name))).blob()); };
+    const a = el('a', 'mute', 'download'); a.href = '/api/samples/' + encodeURIComponent(s.name);
+    r.append(d, b, a); $('samples').appendChild(r); });
+  renderDocs();
+  $('form').onsubmit = e => { e.preventDefault(); send($('msg').value); };
+  $('up').onclick = () => { const f = $('file').files[0]; if (f) upload(f.name, f); };
+  $('verify').onclick = async () => { const b = (await api('/api/audit')).body;
+    $('audit').textContent = b.intact ? `intact: ${b.events} chained events` : `BROKEN: ${b.reason}`; };
+  say('bot', 'Hi. Upload a statement (or use a generated sample on the right), then ask a question. I only read what you are allowed to see.');
+}
+init();
+</script>
+</body>
+</html>

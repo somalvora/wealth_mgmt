@@ -356,6 +356,16 @@ Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded pl
 
 `models(role)` selects the chat model for `router`, `ledger_analyst` and `policy_compliance`. If no factory is given, the specialists use `PlaybackChatModel` scripts. These read real IDs from earlier tool results, so the scripts never hard-code an ID, and the router uses keyword rules. A model that misbehaves makes its own checks fail, while the guardrail checks keep passing; tests cover both cases.
 
+## 4i. Chat demo (`webapp.py`, `sample_statements.py`, `static/demo.html`)
+
+`DemoService` wires one household's ledger, retrieval index, approval graph and models, then `create_app` exposes it with FastAPI: `/api/upload` (PDF or CSV, as a chosen member), `/api/chat` (Supervisor run, returns statements, questions, alerts, agent status and the audit trace), `/api/trace/{id}` (polled by the page while a job runs), `/api/approve` (resumes the approval graph), `/api/audit` (chain verification) and `/api/samples/{name}`. It adds no capability: every guardrail is the existing code. Upload failures are answers, not errors: 422 `rejected` (parse error), 403 `refused` (authorization), 409 `duplicate`. One lock serializes chat, upload and approve. The clock is fixed at `DEMO_AS_OF`, and the ledger is seeded with last year's rental statement and the policy documents. Without `--model` the specialists replay scripts and the router uses keywords.
+
+Plan inputs are derived per request from the asking member (on approval, from whoever asked), never from a fixed identity. Client trace ids must start with `corr_ui_` and be unused, so one cannot merge into another job's trace. A reused `--workdir` reloads its documents and skips the seed.
+
+Security: the page writes model and PDF text with `textContent` only (a test forbids `innerHTML`), ids are validated by regex, messages are capped at 2,000 characters, uploads are read up to the parser's size cap plus one byte, and the server binds to 127.0.0.1. There is no login: the user picks a member. This is a demo, not a deployed service.
+
+`sample_statements.py` generates the five deterministic PDFs with reportlab (`invariant=1`), including a tampered one and an image-only scan.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
