@@ -127,13 +127,15 @@ class LedgerStore:
     # --- authorization helper -------------------------------------------------
 
     def _require(
-        self, actor: Actor, account_id: str, action: Action, purpose: str, correlation_id: str, at: datetime
+        self, actor: Actor, account_id: str, action: Action, purpose: str, correlation_id: str, at: datetime,
+        acting_agent: str | None = None,
     ) -> Decision:
         decision = self.authorizer.authorize(actor, account_id, action, purpose, at)
         self.audit.append(
             correlation_id=correlation_id,
             actor_id=actor.member_id,
             household_id=actor.household_id,
+            acting_agent=acting_agent,
             action=action.value,
             purpose=purpose,
             resource=f"account:{account_id}",
@@ -286,6 +288,7 @@ class LedgerStore:
         include_provisional: bool = False,
         merchant_normalized: str | None = None,
         at: datetime | None = None,
+        acting_agent: str | None = None,
     ) -> list[Transaction]:
         """Latest version of each authorized transaction in the period.
 
@@ -295,7 +298,7 @@ class LedgerStore:
         """
         at = at or datetime.now(UTC)
         for account_id in account_ids:
-            self._require(actor, account_id, Action.READ, purpose, correlation_id, at)
+            self._require(actor, account_id, Action.READ, purpose, correlation_id, at, acting_agent)
 
         allowed = [ReconciliationStatus.RECONCILED.value]
         if include_provisional:

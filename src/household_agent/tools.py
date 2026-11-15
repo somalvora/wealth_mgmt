@@ -167,6 +167,7 @@ class ToolSession:
                 self.actor, self.purpose, self.correlation_id, list(account_ids),
                 date.fromisoformat(start), date.fromisoformat(end),
                 include_provisional=include_provisional, merchant_normalized=merchant, at=self.clock(),
+                acting_agent=self.acting_agent,
             )
             left_out = self.store.left_out_documents(
                 self.actor, self.purpose, self.correlation_id, list(account_ids),

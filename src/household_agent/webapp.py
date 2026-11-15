@@ -200,8 +200,12 @@ class DemoService:
 
     def _approval_view(self, thread_id: str) -> dict[str, Any]:
         state = self.approvals.get_state({"configurable": {"thread_id": thread_id}}).values
-        return {"thread_id": thread_id, "status": state.get("status"), "plan": state.get("plan"),
-                "decision": state.get("decision")}
+        status = state.get("status")
+        current = any(d["name"].startswith("2026_") and d["outcome"] in ("reconciled", "qualified") for d in self.documents)
+        note = ("No statements for the current period are on file, so there is no cash to allocate. Upload this month's "
+                "statements (the rental account and Alex's checking) and ask again.") if status == "not_eligible" and not current else None
+        return {"thread_id": thread_id, "status": status, "plan": state.get("plan"),
+                "decision": state.get("decision"), "note": note}
 
     def approve(self, thread_id: str, approver: str, approved: bool, note: str) -> dict[str, Any]:
         config = {"configurable": {"thread_id": thread_id}}
