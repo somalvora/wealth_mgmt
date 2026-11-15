@@ -198,9 +198,10 @@ def draft_monthly_briefing(
                 kind="closing_balance", evidence_ids=[st["document_id"]],
                 amounts_minor={"opening": st["opening_balance_minor"], "closing": st["closing_balance_minor"]},
                 text=f"{st['account_id']} balance on {st['period_end']}."))
-        verified = store.query_transactions(actor, PURPOSE, correlation_id, readable, start, end, at=as_of)
+        verified = store.query_transactions(actor, PURPOSE, correlation_id, readable, start, end, at=as_of,
+                                            acting_agent="briefing")
         everything = store.query_transactions(actor, PURPOSE, correlation_id, readable, start, end,
-                                              include_provisional=True, at=as_of)
+                                              include_provisional=True, at=as_of, acting_agent="briefing")
         params = {"start": start.isoformat(), "end": end.isoformat()}
         if verified:
             common = dict(actor_id=actor.member_id, household_id=actor.household_id, correlation_id=correlation_id,
