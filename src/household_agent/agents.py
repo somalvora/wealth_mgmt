@@ -567,6 +567,10 @@ class PolicyCompliance:
                            errors=errors, outputs={"final_answer_repaired": True} if repaired else {})
 
 
+NO_LEDGER_FIGURES = ("The ledger analyst found no verified figures for this question. If the statement it needs is not on "
+                     "file yet (for example this month's), upload it and ask again.")
+
+
 # --- routing -----------------------------------------------------------------------------
 
 # Money movement. "pay" alone is refused too, except as the thing a reminder is about ("remind me to pay ...").
@@ -715,14 +719,19 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
         "text": (f"Reminder \"{reminder['title']}\" due {reminder['due_date']} is {reminder['status']}. Approving it only "
                  "writes a local .ics file; no calendar is connected and nothing is sent.")}]
     alloc = state.get("allocation") or {}
+    intent = state["routing"]["intent"]
+    ledger = [r for r in results if r.agent == "ledger_analyst"]
+    no_figures = ([NO_LEDGER_FIGURES] if intent != "statement_ingestion" and ledger
+                  and not any(r.claims or r.questions for r in ledger) else [])
     return {
-        "intent": state["routing"]["intent"],
+        "intent": intent,
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
                        for r in results for c in r.claims if not flagged.intersection(c.evidence_ids)]
                       + list(alloc.get("statements", [])),
         "alerts": alerts,
         "allocation": alloc or None,
-        "questions": [q for r in results for q in r.questions] + ([f"Reminder not drafted: {error}"] if error else [])
+        "questions": [q for r in results for q in r.questions] + no_figures
+                     + ([f"Reminder not drafted: {error}"] if error else [])
                      + list(alloc.get("questions", [])) + list(alloc.get("flags", [])),
         "actions_for_approval": actions,
         "findings": state.get("findings", []),

@@ -362,6 +362,8 @@ Retrieval and privacy build their worlds (temp Chroma index, ledger, recorded pl
 
 Plan inputs are derived per request from the asking member (on approval, from whoever asked), never from a fixed identity. Client trace ids must start with `corr_ui_` and be unused, so one cannot merge into another job's trace. A reused `--workdir` reloads its documents and skips the seed.
 
+Trace labels: `LedgerStore.query_transactions` takes an optional `acting_agent`, which the tools, the planner inputs and the briefing pass, so ledger reads in the audit trail name who read. `compose_briefing` adds an open question when the Ledger Analyst returned no claims or questions (anything but ingestion), so a missing statement is stated rather than silently dropped. An allocation request with no current-period statement on file returns a `note` telling the user to upload one, since the planner's own `not_eligible` message ("build the reserve first") would mislead.
+
 Security: the page writes model and PDF text with `textContent` only (a test forbids `innerHTML`), ids are validated by regex, messages are capped at 2,000 characters, uploads are read up to the parser's size cap plus one byte, and the server binds to 127.0.0.1. There is no login: the user picks a member. This is a demo, not a deployed service.
 
 `sample_statements.py` generates the five deterministic PDFs with reportlab (`invariant=1`), including a tampered one and an image-only scan.
