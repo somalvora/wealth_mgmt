@@ -181,6 +181,26 @@ def test_audit_chain_verifies_then_reports_tampering(client, service):
     assert bad["intact"] is False and bad["reason"]
 
 
+def test_no_current_statements_says_so_instead_of_a_misleading_reserve_message(client):
+    body = client.post("/api/chat", json={"member": "alex", "message": "We have a surplus this month; how should we allocate it?"}).json()
+    assert body["approval"]["status"] == "not_eligible" and "Upload this month" in body["approval"]["note"]
+
+
+def test_ledger_reads_in_the_trace_name_the_agent(client):
+    upload(client, "2026_10_rental_checking.pdf")
+    body = client.post("/api/chat", json={"member": "alex", "message": TAX_QUESTION}).json()
+    reads = [e for e in body["trace"] if e["action"] == "read"]
+    assert reads and all(e["agent"] for e in reads)
+
+
+@pytest.mark.parametrize("intent,expect_note", [("historical_comparison_and_tax_context", True), ("statement_ingestion", False)])
+def test_a_ledger_analyst_with_no_figures_is_called_out_in_the_briefing(intent, expect_note):
+    from household_agent.agents import NO_LEDGER_FIGURES, AgentResult, compose_briefing
+    empty = AgentResult(task_id="t", correlation_id="c", agent="ledger_analyst", status="budget_exhausted").model_dump()
+    out = compose_briefing({"results": [empty], "routing": {"intent": intent}})
+    assert (NO_LEDGER_FIGURES in out["questions"]) is expect_note and out["needs_review"]
+
+
 @pytest.fixture(scope="module")
 def shared_service(tmp_path_factory):
     svc = DemoService(tmp_path_factory.mktemp("web"))

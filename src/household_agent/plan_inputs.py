@@ -139,7 +139,8 @@ def derive_planning_inputs(
 
         start = date.fromisoformat(min(s["period_start"] for s in statements))
         end = date.fromisoformat(max(s["period_end"] for s in statements))
-        txns = store.query_transactions(actor, PURPOSE, correlation_id, [account.account_id], start, end, at=as_of)
+        txns = store.query_transactions(actor, PURPOSE, correlation_id, [account.account_id], start, end, at=as_of,
+                                       acting_agent="planner_inputs")
         run = runner.run("category_totals", txns, actor_id=actor.member_id, household_id=actor.household_id,
                          correlation_id=correlation_id, params={"start": start.isoformat(), "end": end.isoformat()},
                          acting_agent="planner_inputs")
