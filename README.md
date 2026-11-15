@@ -160,6 +160,15 @@ HH_LEDGER_DB=ledger.db HH_ACTOR=alex HH_PURPOSE=budgeting \
   uv run python -m household_agent.mcp_server       # MCP server on stdio (for an MCP client)
 ```
 
+### Chat demo (for the video)
+
+```bash
+uv run python -m household_agent.webapp --model gemini:gemma-4-26b-a4b-it   # then open http://127.0.0.1:8000
+uv run python -m household_agent.webapp                                      # offline: only the property-tax question is scripted
+```
+
+A FastAPI page over the same system: pick who you are (alex, jordan or sam), upload a PDF statement or use one of five generated samples, ask questions, watch the agents' audit trail, approve an allocation plan, and press "Verify chain". The samples show the guardrails: a good October statement reconciles, a tampered closing balance is stored `unreconciled`, a scan is rejected (no text layer), and Alex uploading Jordan's private card is refused. Synthetic data only, bound to 127.0.0.1, no login. A live tax question took about 98 s on Gemma, so rehearse once to warm the LLM cache before recording.
+
 The demo walks through six steps (the full §12 run with all three agents is `vertical_slice`):
 
 1. **Ingests five synthetic statements.** Three reconcile cleanly. Jordan's card statement is `qualified` because it contains two identical Safeway charges that need a human to confirm. The September file is `unreconciled` because its balances don't add up.
@@ -275,7 +284,9 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 
 | `test_readable_accounts.py` | 5 | `readable_accounts()` equals `list_accounts`, charges no tool budget, is empty for a dependent, hides Alex's checking from Jordan; the ledger analyst's first message carries `readable_accounts` |
 
-Total: **660 passing**.
+| `test_webapp.py` | 21 | Chat demo: state lists members, samples and seeded history; the page never uses `innerHTML`; sample PDFs are deterministic; a good PDF reconciles; a tampered closing balance is stored unreconciled; a scan (no text layer) is rejected; Alex uploading Jordan's private card is refused (403) while Jordan can; a repeat upload is a 409; unknown members, empty/oversize messages, bad ids and oversize files are 422; sample downloads and path traversal (404); the tax question answers with evidence and a trace; a transfer request is refused; allocation waits for an adult (a dependent is refused, an adult approves, a repeat is refused); the audit chain verifies and then reports tampering; no random upload ever gives a server error (hypothesis); review fixes: a client trace id must be `corr_ui_`-prefixed and unused, a statement for another household is a 422, an oversize CSV is rejected not truncated, a reused `--workdir` restarts and lists its documents, allocation plans use the asker's own reads (a dependent gets no amounts) |
+
+Total: **681 passing**.
 
 ## Statement format (`hh_statement_csv_v1`)
 
