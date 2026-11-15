@@ -89,6 +89,44 @@ def test_unknown_members_and_bad_inputs_are_422(client):
     assert client.get("/api/trace/a%20b").status_code in (404, 422)
 
 
+def test_a_client_trace_id_cannot_join_an_existing_trace(client):
+    assert client.post("/api/chat", json={"member": "alex", "message": "hi", "correlation_id": "corr_web_seed"}).status_code == 422
+    first = {"member": "alex", "message": "Please transfer $5,000 to savings.", "correlation_id": "corr_ui_x1"}
+    assert client.post("/api/chat", json=first).status_code == 200
+    assert client.post("/api/chat", json=first).status_code == 422  # already used
+
+
+def test_a_statement_for_another_household_is_rejected_not_a_server_error(service):
+    from household_agent.sample_statements import _pdf, statement_lines
+    lines = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 100000, [("2026-10-02", "X", -1000)])
+    lines[0] = "Household ID: hh_other"
+    code, body = service.upload("alex", "other.pdf", _pdf(lines, "t"))
+    assert code == 422 and body["outcome"] == "rejected"
+
+
+def test_an_oversize_csv_is_rejected_not_truncated(client):
+    r = client.post("/api/upload", data={"member": "alex"}, files={"file": ("big.csv", b"x" * (5 * 1024 * 1024 + 5), "text/csv")})
+    assert r.status_code == 422 and "larger than" in r.json()["reason"]
+
+
+def test_a_reused_workdir_starts_again_and_lists_its_documents(tmp_path):
+    first = DemoService(tmp_path)
+    first.upload("alex", "2026_10_alex_checking.pdf", samples()["2026_10_alex_checking.pdf"].content)
+    first.close()
+    again = DemoService(tmp_path)
+    try:
+        assert {d["name"] for d in again.documents} >= {"2025_10_rental_checking.csv", "2026_10_alex_checking.pdf"}
+    finally:
+        again.close()
+
+
+def test_allocation_plans_use_only_what_the_asker_may_read(client):
+    for name in ("2026_10_rental_checking.pdf", "2026_10_alex_checking.pdf"):
+        upload(client, name)
+    body = client.post("/api/chat", json={"member": "sam", "message": "We have a surplus this month; how should we allocate it?"}).json()
+    assert not (body.get("approval") or {}).get("plan", {}).get("allocation_minor")  # a dependent sees none of Alex's balances
+
+
 def test_an_oversize_upload_is_rejected_not_parsed(client):
     r = upload(client, "big.pdf", content=b"%PDF-" + b"0" * (5 * 1024 * 1024 + 10))
     assert r.status_code == 422 and "larger than" in r.json()["reason"]
@@ -103,12 +141,12 @@ def test_sample_downloads(client):
 
 def test_the_tax_question_is_answered_with_evidence_after_the_upload(client):
     upload(client, "2026_10_rental_checking.pdf")
-    body = client.post("/api/chat", json={"member": "alex", "message": TAX_QUESTION, "correlation_id": "corr_t1"}).json()
+    body = client.post("/api/chat", json={"member": "alex", "message": TAX_QUESTION, "correlation_id": "corr_ui_t1"}).json()
     assert body["status"] in ("completed", "needs_review") and body["intent"] == "historical_comparison_and_tax_context"
     assert body["statements"] and all(s["evidence_ids"] for s in body["statements"])
     assert {a["agent"] for a in body["agents"]} == {"ledger_analyst", "policy_compliance"}
     assert [e["action"] for e in body["trace"]][0] == "route" and body["external_action"].startswith("none")
-    assert client.get("/api/trace/corr_t1").json()["trace"] == body["trace"]
+    assert client.get("/api/trace/corr_ui_t1").json()["trace"] == body["trace"]
 
 
 def test_a_money_movement_request_is_refused(client):

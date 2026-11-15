@@ -14,6 +14,7 @@ the app runs offline, but only the property-tax question has a script.
 """
 
 import argparse
+import json
 import re
 import sqlite3
 import tempfile
@@ -99,16 +100,34 @@ class DemoService:
         client = chromadb.PersistentClient(str(self.workdir / "chroma"), settings=Settings(anonymized_telemetry=False))
         self.retrieval = RetrievalService(client, self.embeddings or HashEmbeddings(), self.store.authorizer, self.store.audit)
         ckpt = sqlite3.connect(self.workdir / "checkpoints.db", check_same_thread=False)
+        self.plan_actor = ALEX  # whose reads the planner uses: set per request, under the lock
+        self.requesters: dict[str, Actor] = {}  # approval thread -> who asked, so a resume re-derives the same inputs
+        runner = _runner(self.store)
+
+        def inputs_for(household_id: str):
+            return ledger_inputs_for(self.store, runner, self.plan_actor, clock=lambda: DEMO_AS_OF,
+                                     correlation_id="corr_web_plan", **_planner_kwargs())(household_id)
+
         self.approvals = build_approval_graph(
-            inputs_for=ledger_inputs_for(self.store, _runner(self.store), ALEX, clock=lambda: DEMO_AS_OF,
-                                         correlation_id="corr_web_plan", **_planner_kwargs()),
-            members=MEMBERS, audit=self.store.audit, checkpointer=SqliteSaver(ckpt))
+            inputs_for=inputs_for, members=MEMBERS, audit=self.store.audit, checkpointer=SqliteSaver(ckpt))
+        self._load_documents()
         self._seed()
+
+    def _load_documents(self) -> None:
+        """A reused ``--workdir`` already holds documents; list them again."""
+        for name, doc_id, status, conf, issues in self.conn.execute(
+                "SELECT source_name, document_id, reconciliation_status, document_confidence, issues_json FROM documents "
+                "ORDER BY ingested_at"):
+            self.documents.append({"name": name, "document_id": doc_id, "outcome": status, "confidence": conf,
+                                   "uploaded_by": "", "issues": [{"code": i.get("code"), "message": i.get("message")}
+                                                                 for i in json.loads(issues)]})
 
     def _seed(self) -> None:
         """Last year's statement and the policy sources are already on file, so this year's upload has history."""
         corr = "corr_web_seed"
         name = "2025_10_rental_checking.csv"
+        if any(d["name"] == name for d in self.documents):
+            return  # already seeded: a reused --workdir
         self._ingest(ALEX, demo_statements()[name].encode(), name, corr)
         for doc in demo_policy_documents():
             self.retrieval.index(ALEX, doc, correlation_id=corr, at=DEMO_AS_OF)
@@ -143,11 +162,16 @@ class DemoService:
                 return 403, {"name": name, "outcome": "refused", "reason": str(exc)}
             except DuplicateDocumentError:
                 return 409, {"name": name, "outcome": "duplicate", "reason": "this exact document is already on file"}
+            except ValueError as exc:  # e.g. the statement's household does not match the account's
+                return 422, {"name": name, "outcome": "rejected", "reason": str(exc)[:300]}
 
     def chat(self, member: str, message: str, correlation_id: str | None = None) -> dict[str, Any]:
         actor = self.actor(member)
+        if correlation_id is not None and not (correlation_id.startswith("corr_ui_") and not self.trace(correlation_id)):
+            raise ValueError("correlation_id must start with corr_ui_ and be unused")  # else it could merge into another trace
         corr = correlation_id or f"corr_chat_{uuid.uuid4().hex[:8]}"
         with self.lock:
+            self.plan_actor = actor
             offline = self.model_factory is None
             router = Router(None if offline else self.model_factory("router"))
             specialists = {
@@ -161,6 +185,8 @@ class DemoService:
         briefing = job.get("briefing", {})
         results = [AgentResult.model_validate(r) for r in job.get("results", [])]
         thread = job.get("approval_thread_id")
+        if thread:
+            self.requesters[thread] = actor
         return {
             "correlation_id": corr, "status": job.get("status", "unknown"),
             "intent": job.get("routing", {}).get("intent"),
@@ -185,6 +211,7 @@ class DemoService:
                 return {"thread_id": thread_id, "status": (before.values or {}).get("status", "not_found"),
                         "refused": True, "reason": "there is no plan waiting for approval under this id"}
             denied_before = before.values.get("denied_attempts", 0)
+            self.plan_actor = self.requesters.get(thread_id, ALEX)
             after = self.approvals.invoke(Command(resume={"approver": approver, "approved": approved, "note": note}), config)
         refused = after.get("status") == "awaiting_approval" and after.get("denied_attempts", 0) > denied_before
         return {"thread_id": thread_id, "status": after.get("status"), "refused": refused,
@@ -243,7 +270,10 @@ def create_app(service: DemoService, *, model_label: str = "offline playback") -
     @app.post("/api/upload")
     def upload(member: str = Form(...), file: UploadFile = File(...)) -> JSONResponse:
         bad_member(member)
-        content = file.file.read(MAX_PDF_BYTES + 1)  # one byte over the cap, so the parser rejects an oversize file
+        content = file.file.read(MAX_PDF_BYTES + 1)
+        if len(content) > MAX_PDF_BYTES:  # PDF or CSV: never parse a truncated file
+            return JSONResponse({"name": file.filename, "outcome": "rejected",
+                                 "reason": f"file is larger than {MAX_PDF_BYTES // (1024 * 1024)} MB"}, status_code=422)
         code, body = service.upload(member, Path(file.filename or "upload.pdf").name, content)
         return JSONResponse(body, status_code=code)
 
@@ -252,7 +282,10 @@ def create_app(service: DemoService, *, model_label: str = "offline playback") -
         bad_member(body.member)
         if body.correlation_id is not None and not _ID.match(body.correlation_id):
             raise HTTPException(422, "correlation_id must be 1-64 letters, digits, '_' or '-'")
-        return service.chat(body.member, body.message, body.correlation_id)
+        try:
+            return service.chat(body.member, body.message, body.correlation_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @app.get("/api/trace/{correlation_id}")
     def trace(correlation_id: str) -> dict[str, Any]:
