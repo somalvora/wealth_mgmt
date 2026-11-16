@@ -153,6 +153,41 @@ def write_demo_statements(directory: Path) -> list[Path]:
     return paths
 
 
+# (merchant text, how many a month, lowest and highest amount in cents). Counts and ranges follow the shape of a
+# real card's month (many small grocery and health charges, a few large bills), with made-up merchants. Names that
+# match RULES get a category; the rest stay uncategorized, which is how an unknown merchant behaves.
+_CARD_SPEND = [
+    ("SAFEWAY #{n:04d}", 10, 899, 6400), ("PG&E", 1, 11000, 14000), ("CITY WATER", 1, 4000, 7000),
+    ("STREAMCO MONTHLY", 1, 2399, 2399), ("BAYSIDE PLUMBING INV {n:04d}", 1, 150000, 190000),
+    ("WELLNESS CLINIC {n:03d}", 9, 150, 28000), ("FUEL STOP {n:03d}", 3, 930, 2100),
+    ("SHOP ONLINE {n:03d}", 4, 2000, 9000), ("TRANSIT FARE {n:03d}", 2, 800, 2500),
+    ("CAFE {n:03d}", 1, 600, 1800), ("PERSONAL CARE {n:03d}", 1, 1500, 2500),
+]
+
+
+def realistic_card_statement(seed: int = 1, month: str = "2026-10", account_id: str = "acct_sayali_card",
+                             opening_balance: str = "-1200.00") -> str:
+    """A fictional card month shaped like real card activity: dozens of small charges, one large bill, a
+    payment or two and a return. Deterministic per seed, and it reconciles by construction."""
+    import calendar
+    import random
+
+    rng = random.Random(seed)
+    year, mon = int(month[:4]), int(month[5:7])
+    last_day = calendar.monthrange(year, mon)[1]
+    day = lambda: f"{year:04d}-{mon:02d}-{rng.randint(1, last_day):02d}"  # noqa: E731
+    money = lambda cents: f"{cents // 100}.{cents % 100:02d}"  # noqa: E731
+    rows = []
+    for template, count, low, high in _CARD_SPEND:
+        for _ in range(count):
+            rows.append(Row(day(), template.format(n=rng.randint(1, 999)), "-" + money(rng.randint(low, high))))
+    rows.append(Row(day(), f"RETURN CLINIC {rng.randint(1, 999):03d}", money(rng.randint(400, 4400))))
+    for _ in range(2):
+        rows.append(Row(day(), "CARD PAYMENT THANK YOU", money(rng.randint(3700, 160000))))
+    rows.sort(key=lambda r: r.posted_at)
+    return render_statement(account_id, f"{month}-01", f"{month}-{last_day:02d}", opening_balance, rows)
+
+
 DEMO_AS_OF = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 DEMO_OCTOBERS = (date(2025, 10, 1), date(2026, 10, 31))
 
