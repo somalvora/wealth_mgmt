@@ -207,6 +207,14 @@ def test_a_ledger_analyst_with_no_figures_is_called_out_in_the_briefing(intent, 
     assert (NO_LEDGER_FIGURES in out["questions"]) is expect_note and out["needs_review"]
 
 
+def test_a_crashed_ledger_analyst_is_not_reported_as_a_missing_statement():
+    from household_agent.agents import NO_LEDGER_FIGURES, AgentResult, compose_briefing
+    crashed = AgentResult(task_id="t", correlation_id="c", agent="ledger_analyst", status="failed",
+                          needs_review=True, errors=["GoogleRateLimitError: 429"]).model_dump()
+    out = compose_briefing({"results": [crashed], "routing": {"intent": "historical_comparison"}})
+    assert NO_LEDGER_FIGURES not in out["questions"] and out["needs_review"]
+
+
 def test_the_no_figures_note_does_not_assume_the_missing_statement_is_this_months():
     from household_agent.agents import NO_LEDGER_FIGURES
     assert "past month or year" in NO_LEDGER_FIGURES and "this month's" not in NO_LEDGER_FIGURES
