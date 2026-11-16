@@ -29,7 +29,7 @@ from household_agent.reminders import (
     extract_due_date,
     transition,
 )
-from household_agent.synthetic import ALEX, DEMO_AS_OF
+from household_agent.synthetic import SOMAL, DEMO_AS_OF
 
 TODAY = DEMO_AS_OF.date()
 DUE = date(TODAY.year + 1, 1, 15)
@@ -41,7 +41,7 @@ ALLOWED_PROPS = {"BEGIN", "END", "VERSION", "PRODID", "CALSCALE", "UID", "DTSTAM
 
 def make(**kw):
     args = dict(title="Renew home insurance", due_date=DUE, evidence_ids=EVIDENCE[:1], job_evidence_ids=EVIDENCE,
-                household_id="hh_demo", requested_by="alex", correlation_id="job_r", today=TODAY)
+                household_id="hh_demo", requested_by="somal", correlation_id="job_r", today=TODAY)
     return draft_reminder(**{**args, **kw})
 
 
@@ -66,7 +66,7 @@ def test_draft_is_a_frozen_draft_with_the_given_fields():
 
 
 def test_same_input_gives_same_id_and_same_ics_bytes():
-    a, b = make(), make(requested_by="jordan", correlation_id="other")
+    a, b = make(), make(requested_by="sayali", correlation_id="other")
     assert a.reminder_id == b.reminder_id  # id is a hash of the content only
     assert build_ics(approved(a), STAMP) == build_ics(approved(b), STAMP)
     assert make(title="Different").reminder_id != a.reminder_id
@@ -169,7 +169,7 @@ def _stub(evidence=("chunk_policy_1",)):
 
 
 def _sup(store, tmp_path, stub=None, **kw):
-    return Supervisor(ALEX, Router(), {"policy_compliance": stub or _stub()}, store.audit, clock=lambda: DEMO_AS_OF,
+    return Supervisor(SOMAL, Router(), {"policy_compliance": stub or _stub()}, store.audit, clock=lambda: DEMO_AS_OF,
                       members=MEMBERS, authorizer=store.authorizer, reminder_dir=tmp_path / "ics" if tmp_path else None, **kw)
 
 
@@ -192,7 +192,7 @@ def test_without_a_checkpointer_the_draft_is_listed_and_nothing_else_happens(see
     [action] = out["briefing"]["actions_for_approval"]
     assert action["reminder"]["status"] == "draft" and "__interrupt__" not in out
     assert not (tmp_path / "ics").exists()
-    assert _events(seeded_store.audit, "j_plain") == [("draft_reminder", "alex", "info")]
+    assert _events(seeded_store.audit, "j_plain") == [("draft_reminder", "somal", "info")]
 
 
 def test_draft_approve_creates_the_ics(seeded_store, tmp_path):
@@ -201,7 +201,7 @@ def test_draft_approve_creates_the_ics(seeded_store, tmp_path):
     [intr] = out["__interrupt__"]
     assert out["status"] == "awaiting_reminder_approval" and intr.value["kind"] == "reminder_approval"
     assert not (tmp_path / "ics").exists()  # nothing exists until someone approves
-    done = sup.resume("j_ok", {"approver": "jordan", "approved": True}, checkpointer=saver)
+    done = sup.resume("j_ok", {"approver": "sayali", "approved": True}, checkpointer=saver)
     [action] = done["briefing"]["actions_for_approval"]
     rid = action["reminder"]["reminder_id"]
     assert done["status"] == "reminder_created" and action["reminder"]["status"] == "created"
@@ -213,20 +213,20 @@ def test_draft_approve_creates_the_ics(seeded_store, tmp_path):
     assert seeded_store.audit.verify() > 0
 
 
-@pytest.mark.parametrize("approver", ["sam", "casey_cpa", "mallory", ""])
+@pytest.mark.parametrize("approver", ["viaan", "casey_cpa", "mallory", ""])
 def test_unauthorized_approver_is_refused_audited_and_no_file_is_made(seeded_store, tmp_path, approver):
     sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
     sup.run(REQUEST, correlation_id="j_deny", checkpointer=saver)
     out = sup.resume("j_deny", {"approver": approver, "approved": True}, checkpointer=saver)
     assert out["reminder_denied_attempts"] == 1 and out["__interrupt__"] and not (tmp_path / "ics").exists()
     assert _events(seeded_store.audit, "j_deny")[-1] == ("approve", approver or "unknown", "deny")
-    assert sup.resume("j_deny", {"approver": "alex", "approved": True}, checkpointer=saver)["status"] == "reminder_created"
+    assert sup.resume("j_deny", {"approver": "somal", "approved": True}, checkpointer=saver)["status"] == "reminder_created"
 
 
 def test_rejected_reminder_produces_no_ics(seeded_store, tmp_path):
     sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
     sup.run(REQUEST, correlation_id="j_rej", checkpointer=saver)
-    done = sup.resume("j_rej", {"approver": "jordan", "approved": False, "note": "no"}, checkpointer=saver)
+    done = sup.resume("j_rej", {"approver": "sayali", "approved": False, "note": "no"}, checkpointer=saver)
     assert done["status"] == "reminder_rejected" and done["briefing"]["actions_for_approval"][0]["reminder"]["status"] == "rejected"
     assert not (tmp_path / "ics").exists() and "reminder_file" not in done
 
@@ -234,8 +234,8 @@ def test_rejected_reminder_produces_no_ics(seeded_store, tmp_path):
 def test_resume_does_not_duplicate_audit_events(seeded_store, tmp_path):
     sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
     sup.run(REQUEST, correlation_id="j_dup", checkpointer=saver)
-    sup.resume("j_dup", {"approver": "sam", "approved": True}, checkpointer=saver)  # denied: node re-runs
-    sup.resume("j_dup", {"approver": "alex", "approved": True}, checkpointer=saver)
+    sup.resume("j_dup", {"approver": "viaan", "approved": True}, checkpointer=saver)  # denied: node re-runs
+    sup.resume("j_dup", {"approver": "somal", "approved": True}, checkpointer=saver)
     events = [(e["action"], e["decision"]) for e in seeded_store.audit.events("j_dup")]
     assert events.count(("draft_reminder", "info")) == 1 and events.count(("route", "info")) == 1
     assert events.count(("dispatch", "info")) == 1 and events.count(("create_reminder", "allow")) == 1
@@ -245,9 +245,9 @@ def test_resume_does_not_duplicate_audit_events(seeded_store, tmp_path):
 def test_approved_without_an_export_directory_stays_approved(seeded_store):
     sup, saver = _sup(seeded_store, None), InMemorySaver()
     sup.run(REQUEST, correlation_id="j_nodir", checkpointer=saver)
-    done = sup.resume("j_nodir", {"approver": "alex", "approved": True}, checkpointer=saver)
+    done = sup.resume("j_nodir", {"approver": "somal", "approved": True}, checkpointer=saver)
     assert done["briefing"]["actions_for_approval"][0]["reminder"]["status"] == "approved"
-    assert ("create_reminder", "alex", "deny") in _events(seeded_store.audit, "j_nodir")
+    assert ("create_reminder", "somal", "deny") in _events(seeded_store.audit, "j_nodir")
 
 
 def test_no_evidence_or_no_date_means_no_draft_and_an_open_question(seeded_store, tmp_path):
@@ -264,7 +264,7 @@ def test_newline_in_the_request_cannot_inject_a_property(seeded_store, tmp_path)
     sup, saver = _sup(seeded_store, tmp_path), InMemorySaver()
     sup.run(f"add renewal on {DUE.isoformat()} to my calendar\nATTENDEE:mailto:evil@example.com", correlation_id="j_inj",
             checkpointer=saver)
-    done = sup.resume("j_inj", {"approver": "alex", "approved": True}, checkpointer=saver)
+    done = sup.resume("j_inj", {"approver": "somal", "approved": True}, checkpointer=saver)
     ics = Path(done["reminder_file"]).read_bytes()
     assert b"ATTENDEE" in ics and b"\r\nATTENDEE" not in ics and all(n in ALLOWED_PROPS for n in
         [ln.split(":", 1)[0].split(";", 1)[0] for ln in unfold(ics)])
@@ -314,7 +314,7 @@ def _review_job(store, tmp_path):
     plan = [DispatchItem(agent="policy_compliance", task="good", depends_on_ledger=False),
             DispatchItem(agent="policy_compliance", task="bad", depends_on_ledger=False)]
     router = _fixed(intent="tax_context", dispatch_plan=plan, reminder_requested=True)
-    return Supervisor(ALEX, router, {"policy_compliance": _two_results()}, store.audit, clock=lambda: DEMO_AS_OF,
+    return Supervisor(SOMAL, router, {"policy_compliance": _two_results()}, store.audit, clock=lambda: DEMO_AS_OF,
                       members=MEMBERS, authorizer=store.authorizer, reminder_dir=tmp_path / "ics")
 
 
@@ -322,7 +322,7 @@ def test_rejected_review_skips_the_reminder_and_keeps_its_status(seeded_store, t
     sup, saver = _review_job(seeded_store, tmp_path), InMemorySaver()
     out = sup.run(REQUEST, correlation_id="j_h1r", checkpointer=saver)
     assert out["status"] == "awaiting_review"
-    done = sup.resume("j_h1r", {"reviewer": "alex", "accepted": False, "note": "no"}, checkpointer=saver)
+    done = sup.resume("j_h1r", {"reviewer": "somal", "accepted": False, "note": "no"}, checkpointer=saver)
     assert done["status"] == "review_rejected" and "reminder" not in done and "__interrupt__" not in done
     assert done["briefing"]["actions_for_approval"] == []
     assert any("no reminder was drafted" in q for q in done["briefing"]["questions"])
@@ -336,10 +336,10 @@ def test_rejected_review_skips_the_reminder_and_keeps_its_status(seeded_store, t
 def test_accepted_review_drafts_a_reminder_from_completed_results_only(seeded_store, tmp_path):
     sup, saver = _review_job(seeded_store, tmp_path), InMemorySaver()
     sup.run(REQUEST, correlation_id="j_h1a", checkpointer=saver)
-    done = sup.resume("j_h1a", {"reviewer": "alex", "accepted": True}, checkpointer=saver)
+    done = sup.resume("j_h1a", {"reviewer": "somal", "accepted": True}, checkpointer=saver)
     assert done["status"] == "awaiting_reminder_approval"
     assert done["reminder"]["source_evidence_ids"] == ["chunk_policy_1"]  # the needs_review result's evidence is not used
-    final = sup.resume("j_h1a", {"approver": "alex", "approved": True}, checkpointer=saver)
+    final = sup.resume("j_h1a", {"approver": "somal", "approved": True}, checkpointer=saver)
     assert final["status"] == "reminder_created"
 
 
@@ -355,7 +355,7 @@ def test_evidence_from_flagged_documents_is_not_used_for_a_reminder(seeded_store
                            status="completed", evidence_ids=["chunk_policy_1", "calc_run_bad"],
                            outputs={"evidence_documents": {"calc_run_bad": ["doc_bad"]}})
     plan = [DispatchItem(agent="ledger_analyst", task="ledger"), DispatchItem(agent="policy_compliance", task="p", depends_on_ledger=False)]
-    sup = Supervisor(ALEX, _fixed(intent="historical_comparison_and_tax_context", dispatch_plan=plan, reminder_requested=True),
+    sup = Supervisor(SOMAL, _fixed(intent="historical_comparison_and_tax_context", dispatch_plan=plan, reminder_requested=True),
                      {"ledger_analyst": run, "policy_compliance": run}, seeded_store.audit, clock=lambda: DEMO_AS_OF)
     out = sup.run(REQUEST, correlation_id="j_h1f")
     assert out["reminder"]["source_evidence_ids"] == ["chunk_policy_1"]
@@ -380,7 +380,7 @@ def _model_router(**flags):
     f"Remind me on {DUE.isoformat()} about the renewal and pay the invoice now",
     "Remind me about the renewal and send money to the landlord",
     "set a reminder for the renewal and wire $500 to savings",
-    "Remind me about the bill and then pay it", "Remind me in January and venmo Sam",
+    "Remind me about the bill and then pay it", "Remind me in January and venmo Viaan",
     "Please pay the county tax bill", "move funds to brokerage"])
 def test_money_movement_is_refused_with_or_without_a_reminder_phrase(text):
     assert rule_route(text).external_action_requested
@@ -397,19 +397,19 @@ def test_a_model_yes_survives_a_rules_no_and_a_rules_yes_survives_a_model_no(see
     decision, source = _model_router(external_action_requested=True, reminder_requested=True)(REQUEST)
     assert source == "model" and decision.external_action_requested is True  # rules say no, model says yes
     stub = _stub()
-    sup = Supervisor(ALEX, _model_router(external_action_requested=True), {"policy_compliance": stub},
+    sup = Supervisor(SOMAL, _model_router(external_action_requested=True), {"policy_compliance": stub},
                      seeded_store.audit, clock=lambda: DEMO_AS_OF)
     assert sup.run(REQUEST, correlation_id="j_h2m")["status"] == "refused" and stub.calls == []
     pay = f"Remind me on {DUE.isoformat()} about the renewal and pay the invoice now"
     decision, _ = _model_router(external_action_requested=False)(pay)
     assert decision.external_action_requested is True
-    out = Supervisor(ALEX, _model_router(external_action_requested=False), {"policy_compliance": stub},
+    out = Supervisor(SOMAL, _model_router(external_action_requested=False), {"policy_compliance": stub},
                      seeded_store.audit, clock=lambda: DEMO_AS_OF).run(pay, correlation_id="j_h2p")
     assert out["status"] == "refused" and stub.calls == [] and "reminder" not in out
 
 
 def test_a_plain_reminder_with_a_model_router_is_still_allowed(seeded_store, tmp_path):
-    sup = Supervisor(ALEX, _model_router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: DEMO_AS_OF)
+    sup = Supervisor(SOMAL, _model_router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: DEMO_AS_OF)
     out = sup.run(REQUEST, correlation_id="j_h2ok")
     assert out["status"] != "refused" and out["reminder"]["status"] == "draft"
 
@@ -443,7 +443,7 @@ def test_the_job_date_comes_from_the_caller_not_the_utc_clock(seeded_store):
     """Clock says 03:00 UTC on Nov 10, but the member's local day is still Nov 9."""
     late = datetime(2026, 11, 10, 3, 0, tzinfo=UTC)
     request = "add my renewal on 2026-11-09 to my calendar"
-    mk = lambda: Supervisor(ALEX, Router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: late)  # noqa: E731
+    mk = lambda: Supervisor(SOMAL, Router(), {"policy_compliance": _stub()}, seeded_store.audit, clock=lambda: late)  # noqa: E731
     refused = mk().run(request, correlation_id="j_utc")
     assert any("past" in q for q in refused["briefing"]["questions"])  # without a local date the UTC date is used
     ok = mk().run(request, correlation_id="j_local", today=date(2026, 11, 9))
@@ -470,11 +470,11 @@ def test_dtstamp_names_the_same_instant_in_any_zone(hours):
 # LOW (b) a reminder request with nothing to dispatch
 
 def test_a_reminder_request_with_an_empty_plan_gets_an_explicit_answer(seeded_store):
-    sup = Supervisor(ALEX, _fixed(intent="out_of_scope", reminder_requested=True), {}, seeded_store.audit,
+    sup = Supervisor(SOMAL, _fixed(intent="out_of_scope", reminder_requested=True), {}, seeded_store.audit,
                      clock=lambda: DEMO_AS_OF)
     out = sup.run(REQUEST, correlation_id="j_empty")
     assert out["briefing"]["actions_for_approval"] == [] and any("evidence" in q for q in out["briefing"]["questions"])
-    assert ("draft_reminder", "alex", "deny") in [(e["action"], e["actor_id"], e["decision"])
+    assert ("draft_reminder", "somal", "deny") in [(e["action"], e["actor_id"], e["decision"])
                                                   for e in seeded_store.audit.events("j_empty")]
 
 
@@ -530,10 +530,10 @@ def test_a_symlinked_export_target_is_audited_and_the_reminder_stays_approved(se
     victim = tmp_path / "victim.txt"
     victim.write_text("keep me")
     (tmp_path / "ics" / ics_filename(draft)).symlink_to(victim)
-    done = sup.resume("j_link", {"approver": "alex", "approved": True}, checkpointer=saver)
+    done = sup.resume("j_link", {"approver": "somal", "approved": True}, checkpointer=saver)
     assert victim.read_text() == "keep me" and "reminder_file" not in done
     assert done["briefing"]["actions_for_approval"][0]["reminder"]["status"] == "approved"
-    assert ("create_reminder", "alex", "deny") in _events(seeded_store.audit, "j_link")
+    assert ("create_reminder", "somal", "deny") in _events(seeded_store.audit, "j_link")
 
 
 # LOW (d) denied-attempt caps

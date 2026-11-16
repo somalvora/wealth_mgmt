@@ -14,7 +14,7 @@ def _recon(text, historical=frozenset()):
 
 
 def _stmt(rows, **kw):
-    return render_statement("acct_alex_checking", "2026-10-01", "2026-10-31", "1000.00", rows, **kw)
+    return render_statement("acct_somal_checking", "2026-10-01", "2026-10-31", "1000.00", rows, **kw)
 
 
 # --- parser ---------------------------------------------------------------

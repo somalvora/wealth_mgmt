@@ -21,18 +21,18 @@ from household_agent.agents import (
 )
 from household_agent.mcp_server import MEMBERS
 from household_agent.tools import ToolSession
-from household_agent.synthetic import ALEX, DEMO_AS_OF, demo_statements
+from household_agent.synthetic import SOMAL, DEMO_AS_OF, demo_statements
 from test_agents import Scripted, call, final
 
-CORRUPT = "2026_09_alex_checking_corrupt.csv"
+CORRUPT = "2026_09_somal_checking_corrupt.csv"
 
 
-def _job(store, categorizer, steps, actor=ALEX, csv_text=demo_statements()[CORRUPT]):
+def _job(store, categorizer, steps, actor=SOMAL, csv_text=demo_statements()[CORRUPT]):
     ledger = LedgerAnalyst(Scripted(steps=steps), store, categorizer, actor, clock=lambda: DEMO_AS_OF)
     decision = RoutingDecision(intent="statement_ingestion",  # ingest_statement is offered only for this intent
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="ingest",
                                                            inputs={"csv_text": csv_text})])
-    return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": ledger}, store.audit,
+    return Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": ledger}, store.audit,
                       clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=store.authorizer)
 
 
@@ -49,17 +49,17 @@ def test_unreconciled_ingest_is_routed_to_review_and_resolved_by_an_adult(store,
     [f] = out["findings"]
     assert f["type"] == "data_quality" and f["status"] == "unreconciled" and f["source_name"] == CORRUPT
     assert f["document_id"] and f["issue_codes"] and out["status"] == "awaiting_review" and out["__interrupt__"]
-    done = sup.resume("j_dq", {"reviewer": "jordan", "accepted": True, "note": "ask for a new statement"},
+    done = sup.resume("j_dq", {"reviewer": "sayali", "accepted": True, "note": "ask for a new statement"},
                       checkpointer=saver)
     b = done["briefing"]
-    assert done["status"] == "reviewed" and b["needs_review"] is True and b["review"]["reviewer"] == "jordan"
+    assert done["status"] == "reviewed" and b["needs_review"] is True and b["review"]["reviewer"] == "sayali"
     [alert] = b["alerts"]
     assert CORRUPT in alert["text"] and "left out of this briefing" in alert["text"]
     assert b["statements"] == [] and alert["issue_codes"] == f["issue_codes"]
     assert store.audit.verify() > 0
 
 
-@pytest.mark.parametrize("reviewer", ["sam", "mallory"])
+@pytest.mark.parametrize("reviewer", ["viaan", "mallory"])
 def test_dependent_or_unknown_resolver_is_refused_and_audited(store, categorizer, reviewer):
     sup = _job(store, categorizer, _ingest_corrupt())
     saver = InMemorySaver()
@@ -71,7 +71,7 @@ def test_dependent_or_unknown_resolver_is_refused_and_audited(store, categorizer
 
 
 def test_reconciled_document_produces_no_finding_and_no_pause(store, categorizer):
-    csv_text = demo_statements()["2026_10_alex_checking.csv"]
+    csv_text = demo_statements()["2026_10_somal_checking.csv"]
     steps = [call("ingest_statement", csv_text=csv_text, source_name="ok.csv"), final()]
     out = _job(store, categorizer, steps, csv_text=csv_text).run("ingest", correlation_id="j_ok", checkpointer=InMemorySaver())
     assert out["findings"] == [] and "__interrupt__" not in out and out["briefing"]["alerts"] == []
@@ -105,27 +105,27 @@ def test_findings_exist_exactly_for_unreconciled_or_unverified_ingests(kinds):
 
 # --- queries and calculations report what they left out (M3) and the briefing drops derived figures (M4) -----------
 
-PRIVATE = "acct_alex_checking"
+PRIVATE = "acct_somal_checking"
 RENTAL = "acct_rental_checking"
 TAX = "San Mateo County Tax Collector"
 
 
-def _tools(store, categorizer, actor=ALEX):
+def _tools(store, categorizer, actor=SOMAL):
     return ToolSession(store, categorizer, actor, "historical_comparison", "job_tools", clock=lambda: DEMO_AS_OF)
 
 
 def _corrupt_doc_id(store):
-    [doc] = [d for d in store.document_coverage(ALEX, "historical_comparison", "c", [PRIVATE], DEMO_AS_OF.date().replace(month=9, day=1),
+    [doc] = [d for d in store.document_coverage(SOMAL, "historical_comparison", "c", [PRIVATE], DEMO_AS_OF.date().replace(month=9, day=1),
                                                 DEMO_AS_OF.date().replace(month=9, day=30))
              if d["status"] == "unreconciled"]
     return doc["document_id"]
 
 
 def _read_job(store, categorizer, steps):
-    ledger = LedgerAnalyst(Scripted(steps=steps), store, categorizer, ALEX, clock=lambda: DEMO_AS_OF)
+    ledger = LedgerAnalyst(Scripted(steps=steps), store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)
     decision = RoutingDecision(intent="historical_comparison",
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="read")])
-    return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": ledger}, store.audit,
+    return Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": ledger}, store.audit,
                       clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=store.authorizer)
 
 
@@ -161,7 +161,7 @@ def test_a_query_over_a_corrupt_statement_becomes_a_finding_a_review_and_an_aler
     assert f["type"] == "data_quality" and f["status"] == "unreconciled" and f["source"] == "query_ledger"
     assert f["document_id"] == _corrupt_doc_id(seeded_store) and f["source_name"] == CORRUPT
     assert out["status"] == "awaiting_review" and out["__interrupt__"]
-    done = sup.resume("j_q", {"reviewer": "alex", "accepted": True}, checkpointer=saver)
+    done = sup.resume("j_q", {"reviewer": "somal", "accepted": True}, checkpointer=saver)
     b = done["briefing"]
     assert b["needs_review"] is True and [a["document_id"] for a in b["alerts"]] == [f["document_id"]]
     assert CORRUPT in b["alerts"][0]["text"]
@@ -204,7 +204,7 @@ def test_a_claim_citing_a_calculation_run_built_on_a_flagged_document_is_dropped
     control = _read_job(seeded_store, categorizer, _rental_variance_steps(True)).run("read", correlation_id="j_ctl")
     [kept] = control["briefing"]["statements"]  # unflagged: the claim reaches the briefing
     assert kept["evidence_ids"][0].startswith("calc_run_") and not any(f["type"] == "data_quality" for f in control["findings"])
-    [oct_doc] = [d for d in seeded_store.document_coverage(ALEX, "historical_comparison", "c", [RENTAL], DEMO_AS_OF.date().replace(month=10, day=1),
+    [oct_doc] = [d for d in seeded_store.document_coverage(SOMAL, "historical_comparison", "c", [RENTAL], DEMO_AS_OF.date().replace(month=10, day=1),
                                                            DEMO_AS_OF.date().replace(month=10, day=31))
                  if d["source_name"] == "2026_10_rental_checking.csv"]
     _flag_unverified(seeded_store, oct_doc["document_id"])
@@ -217,7 +217,7 @@ def test_a_claim_citing_a_calculation_run_built_on_a_flagged_document_is_dropped
 
 
 def test_without_include_provisional_an_unverified_statement_is_left_out_and_reported(seeded_store, categorizer):
-    doc = next(d for d in seeded_store.document_coverage(ALEX, "historical_comparison", "c", [RENTAL], DEMO_AS_OF.date().replace(month=10, day=1),
+    doc = next(d for d in seeded_store.document_coverage(SOMAL, "historical_comparison", "c", [RENTAL], DEMO_AS_OF.date().replace(month=10, day=1),
                                                          DEMO_AS_OF.date().replace(month=10, day=31))
                if d["source_name"] == "2026_10_rental_checking.csv")
     _flag_unverified(seeded_store, doc["document_id"])

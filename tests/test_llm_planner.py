@@ -186,9 +186,9 @@ def test_approving_a_model_plan_makes_no_further_model_calls():
     graph = build_approval_graph(inputs_for=lambda hh: INPUTS, members=MEMBERS,
                                  audit=AuditLog(sqlite3.connect(":memory:")), checkpointer=InMemorySaver(),
                                  generator=LLMThoughtGenerator(model))
-    thread_id, out = start_request(graph, HOUSEHOLD, "alex")
+    thread_id, out = start_request(graph, HOUSEHOLD, "somal")
     assert out["status"] == "awaiting_approval" and model.calls == 5
-    out = graph.invoke(Command(resume={"approver": "jordan", "approved": True}),
+    out = graph.invoke(Command(resume={"approver": "sayali", "approved": True}),
                        {"configurable": {"thread_id": thread_id}})
     assert out["status"] == "approved" and model.calls == 5
 

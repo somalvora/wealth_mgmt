@@ -84,7 +84,7 @@ def test_artifacts_are_kept_in_the_workdir(tmp_path):
     md = (tmp_path / "briefing_2026-10.md").read_text()
     assert md == report.briefing_markdown and md.rstrip().endswith(DISCLAIMER)
     assert "$450.00 (16.36%) higher" in md and "waiting for a household admin" in md
-    assert "acct_jordan_card" not in md
+    assert "acct_sayali_card" not in md
 
 
 def test_resume_does_not_rerun_the_planning_step(tmp_path):

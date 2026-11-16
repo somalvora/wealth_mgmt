@@ -67,13 +67,13 @@ from household_agent.planning import TemplateThoughtGenerator, Thought, inputs_h
 from household_agent.retrieval import CANNOT_VERIFY, Claim, RetrievalService, validate_claims
 from household_agent.synthetic import (
     ACCOUNTS,
-    ALEX,
+    SOMAL,
     CASEY_CPA,
     DEMO_AS_OF,
     DEMO_OCTOBERS,
-    JORDAN,
+    SAYALI,
     RULES,
-    SAM,
+    VIAAN,
     cpa_grant,
     demo_planning_inputs,
     demo_policy_documents,
@@ -93,9 +93,9 @@ OCTOBER = date(2026, 10, 1)
 EXPECTED_STATUS = {
     "2025_10_rental_checking.csv": "reconciled",
     "2026_10_rental_checking.csv": "reconciled",
-    "2026_10_alex_checking.csv": "reconciled",
-    "2026_10_jordan_card.csv": "qualified",  # duplicate Safeway charge
-    "2026_09_alex_checking_corrupt.csv": "unreconciled",
+    "2026_10_somal_checking.csv": "reconciled",
+    "2026_10_sayali_card.csv": "qualified",  # duplicate Safeway charge
+    "2026_09_somal_checking_corrupt.csv": "unreconciled",
 }
 REQUIRED_JOB_ACTIONS = frozenset({"ingest_document", Action.INDEX.value, Action.READ.value, Action.RETRIEVE.value,
                                   "calculate", "route", "dispatch", "threshold_check", "compose_briefing"})
@@ -254,7 +254,7 @@ def _planner_kwargs() -> dict[str, Any]:
 
 
 def _approval_graph(env: _Env, ckpt: sqlite3.Connection, correlation_id: str):
-    inputs_for = ledger_inputs_for(env.store, env.runner, ALEX, clock=lambda: DEMO_AS_OF,
+    inputs_for = ledger_inputs_for(env.store, env.runner, SOMAL, clock=lambda: DEMO_AS_OF,
                                    correlation_id=correlation_id, **_planner_kwargs())
     return build_approval_graph(inputs_for=inputs_for, members=MEMBERS, audit=env.store.audit,
                                 checkpointer=SqliteSaver(ckpt))
@@ -284,7 +284,7 @@ def run_vertical_slice(
     # 1. parse -> authorize -> reconcile (each owner uploads their own statements)
     ingested: dict[str, IngestResult] = {}
     for name, content in demo_statements().items():
-        actor = JORDAN if "jordan_card" in name else ALEX
+        actor = SAYALI if "sayali_card" in name else SOMAL
         ingested[name] = ingest_statement(store, categorizer, actor, content.encode(), name,
                                           purpose="statement_ingestion", correlation_id=corr, at=at)
     got = {n: r.status.value for n, r in ingested.items()}
@@ -296,9 +296,9 @@ def run_vertical_slice(
     retrieval = RetrievalService(client, embeddings or HashEmbeddings(), store.authorizer, store.audit)
     indexed, refused = [], []
     for doc in demo_policy_documents():
-        indexed += retrieval.index(ALEX, doc, correlation_id=corr, at=at)
+        indexed += retrieval.index(SOMAL, doc, correlation_id=corr, at=at)
     try:
-        retrieval.index(SAM, demo_policy_documents()[0], correlation_id=corr, at=at)
+        retrieval.index(VIAAN, demo_policy_documents()[0], correlation_id=corr, at=at)
     except AuthorizationError as exc:
         refused.append(str(exc))
 
@@ -307,11 +307,11 @@ def run_vertical_slice(
     router_model = models("router") if models else None  # None = keyword router
     specialists = {
         "ledger_analyst": LedgerAnalyst(models("ledger_analyst") if models else ledger_playback(),
-                                        store, categorizer, ALEX, clock=lambda: at),
+                                        store, categorizer, SOMAL, clock=lambda: at),
         "policy_compliance": PolicyCompliance(models("policy_compliance") if models else policy_playback(),
-                                              retrieval, ALEX, clock=lambda: at),
+                                              retrieval, SOMAL, clock=lambda: at),
     }
-    job = Supervisor(ALEX, Router(router_model), specialists, store.audit, clock=lambda: at).run(
+    job = Supervisor(SOMAL, Router(router_model), specialists, store.audit, clock=lambda: at).run(
         TRACE_REQUEST, correlation_id=corr)
     results = [AgentResult.model_validate(r) for r in job.get("results", [])]
     by_agent = {r.agent: r for r in results}
@@ -346,26 +346,26 @@ def run_vertical_slice(
           f"{calc_run_id} <- {len(txn_ids)} transactions <- " + ", ".join(f"{d} ({h[:15]}...)" for d, h in docs)
           + f"; correlation_id={corr}", [calc_run_id, *txn_ids, *(d for d, _ in docs)])
 
-    # 5. authorization denial: Jordan asks for Alex's private checking
+    # 5. authorization denial: Sayali asks for Somal's private checking
     try:
-        store.query_transactions(JORDAN, "budgeting", corr, ["acct_alex_checking"], *DEMO_OCTOBERS, at=at)
+        store.query_transactions(SAYALI, "budgeting", corr, ["acct_somal_checking"], *DEMO_OCTOBERS, at=at)
         denied = ""
     except AuthorizationError as exc:
         denied = str(exc)
     deny_events = [e for e in store.audit.events(corr) if e["decision"] == "deny"
-                   and e["actor_id"] == "jordan" and e["resource"] == "account:acct_alex_checking"]
+                   and e["actor_id"] == "sayali" and e["resource"] == "account:acct_somal_checking"]
     check("authorization_denial", "authorization denial", bool(denied) and bool(deny_events) and bool(refused),
-          f"jordan -> acct_alex_checking: {denied or 'ALLOWED'}; sam indexing: {refused[0] if refused else 'ALLOWED'}",
+          f"sayali -> acct_somal_checking: {denied or 'ALLOWED'}; viaan indexing: {refused[0] if refused else 'ALLOWED'}",
           [e["event_id"] for e in deny_events])
 
-    # 6. consent revocation: both owners let the CPA read the rental account; Jordan revokes
+    # 6. consent revocation: both owners let the CPA read the rental account; Sayali revokes
     g = cpa_grant(at + timedelta(days=180))
-    env.consent.grant(ALEX, g, correlation_id=corr, at=at)
-    env.consent.grant(JORDAN, replace(g, grant_id="grant_cpa_rental_jordan", grantor_id="jordan", version="cv_2"),
+    env.consent.grant(SOMAL, g, correlation_id=corr, at=at)
+    env.consent.grant(SAYALI, replace(g, grant_id="grant_cpa_rental_sayali", grantor_id="sayali", version="cv_2"),
                       correlation_id=corr, at=at)
     before = len(store.query_transactions(CASEY_CPA, "tax_preparation", corr, [RENTAL], *DEMO_OCTOBERS, at=at))
     revoked_at = at + timedelta(minutes=5)
-    env.consent.revoke(JORDAN, "grant_cpa_rental_jordan", correlation_id=corr, at=revoked_at)
+    env.consent.revoke(SAYALI, "grant_cpa_rental_sayali", correlation_id=corr, at=revoked_at)
     try:
         store.query_transactions(CASEY_CPA, "tax_preparation", corr, [RENTAL], *DEMO_OCTOBERS,
                                  at=revoked_at + timedelta(seconds=1))
@@ -373,22 +373,22 @@ def run_vertical_slice(
     except AuthorizationError as exc:
         after = str(exc)
     check("consent_revocation_denial", "consent-revocation denial", before > 0 and after != "ALLOWED",
-          f"CPA read {before} rental transactions with both owners' consent; after Jordan revoked: {after}",
-          ["grant_cpa_rental", "grant_cpa_rental_jordan"])
+          f"CPA read {before} rental transactions with both owners' consent; after Sayali revoked: {after}",
+          ["grant_cpa_rental", "grant_cpa_rental_sayali"])
 
     # 7. unreconciled data is blocked from every calculation
-    corrupt = ingested["2026_09_alex_checking_corrupt.csv"]
-    sept = store.query_transactions(ALEX, "budgeting", corr, ["acct_alex_checking"], date(2026, 9, 1),
+    corrupt = ingested["2026_09_somal_checking_corrupt.csv"]
+    sept = store.query_transactions(SOMAL, "budgeting", corr, ["acct_somal_checking"], date(2026, 9, 1),
                                     date(2026, 9, 30), include_provisional=True, at=at)
     raw_ids = [r[0] for r in env.conn.execute("SELECT transaction_id FROM transactions WHERE source_document_id = ?",
                                               (corrupt.document_id,))]
     try:
-        runner.run("cash_flow", [store._latest(t) for t in raw_ids], actor_id="alex", household_id=ALEX.household_id,
+        runner.run("cash_flow", [store._latest(t) for t in raw_ids], actor_id="somal", household_id=SOMAL.household_id,
                    correlation_id=corr, params={"start": "2026-09-01", "end": "2026-09-30"})
         blocked = ""
     except IneligibleInputError as exc:
         blocked = str(exc)
-    sept_brief = draft_monthly_briefing(store, runner, ALEX, month=date(2026, 9, 1), as_of=at, correlation_id=corr)
+    sept_brief = draft_monthly_briefing(store, runner, SOMAL, month=date(2026, 9, 1), as_of=at, correlation_id=corr)
     check("unreconciled_block", "unreconciled-data block",
           corrupt.status.value == "unreconciled" and sept == [] and bool(raw_ids) and bool(blocked)
           and sept_brief.net_worth_and_cash_flow == [] and sept_brief.calc_run_ids == [],
@@ -396,9 +396,9 @@ def run_vertical_slice(
           f"{blocked or 'ALLOWED'}; September briefing has no figures", [corrupt.document_id])
 
     # 8. stale sources are escalated, never cited
-    old = retrieval.retrieve_verified(ALEX, "tax_preparation", "2024 county tax bill first installment parcel",
+    old = retrieval.retrieve_verified(SOMAL, "tax_preparation", "2024 county tax bill first installment parcel",
                                       correlation_id=corr, at=at, collections=["policies_compliance"])
-    irs = retrieval.retrieve_verified(ALEX, "tax_preparation", "rental property tax deductible Schedule E",
+    irs = retrieval.retrieve_verified(SOMAL, "tax_preparation", "rental property tax deductible Schedule E",
                                       correlation_id=corr, at=at, collections=["policies_compliance"])
     passages = {p["chunk_id"]: p for p in old["passages"] + irs["passages"]}
     expired = [i for i, p in passages.items() if p["verification"] == "expired"]
@@ -415,10 +415,10 @@ def run_vertical_slice(
           f"agent questions: {policy.questions if policy else []}", [*expired, *irs_ids])
 
     # 9. §5.8 planning: reproducible tree, hard-pruned cap breach, critic discrepancy
-    plan = plan_from_ledger(store, runner, ALEX, as_of=at, correlation_id=corr, **_planner_kwargs())
+    plan = plan_from_ledger(store, runner, SOMAL, as_of=at, correlation_id=corr, **_planner_kwargs())
     result, derived, plan_run_id = plan
     again = plan_allocation(derived.inputs)
-    rederived = derive_planning_inputs(store, runner, ALEX, as_of=at, correlation_id=corr, **_planner_kwargs())
+    rederived = derive_planning_inputs(store, runner, SOMAL, as_of=at, correlation_id=corr, **_planner_kwargs())
     tree = lambda r: [(n.node_id, n.status, str(n.score.composite)) for n in r.trace]  # noqa: E731
     check("planning_reproducible", "same input hash -> same tree",
           result.status == "awaiting_approval" and again.input_hash == result.input_hash == inputs_hash(rederived.inputs)
@@ -444,13 +444,13 @@ def run_vertical_slice(
 
     # 10. interrupt: the allocation request pauses for approval (checkpoint on disk)
     ckpt = sqlite3.connect(workdir / "checkpoints.db", check_same_thread=False)
-    paused = Supervisor(ALEX, Router(router_model), {}, store.audit, clock=lambda: at,
+    paused = Supervisor(SOMAL, Router(router_model), {}, store.audit, clock=lambda: at,
                         approval_graph=_approval_graph(env, ckpt, f"{corr}_plan")).run(
                             PLAN_REQUEST, correlation_id=f"{corr}_plan")
     thread_id = paused.get("approval_thread_id") or ""
 
     # 11. the monthly briefing (draft only) with the job's results, findings and plan
-    briefing = draft_monthly_briefing(store, runner, ALEX, month=OCTOBER, as_of=at, correlation_id=corr,
+    briefing = draft_monthly_briefing(store, runner, SOMAL, month=OCTOBER, as_of=at, correlation_id=corr,
                                       agent_results=results, findings=job.get("findings", []), plan=plan,
                                       approval_thread_id=thread_id or None)
     markdown = render_markdown(briefing)
@@ -463,8 +463,8 @@ def run_vertical_slice(
           briefing.draft and briefing.external_action == "none" and markdown.rstrip().endswith(DISCLAIMER)
           and {"cash_flow", "category_totals", "material_variance", "allocation_scenario", "approval_pending"} <= kinds
           and all(i.evidence_ids for s in sections for i in s if i.amounts_minor)
-          and "acct_jordan_card" not in briefing.model_dump_json(),
-          f"{sum(map(len, sections))} items; calc runs {briefing.calc_run_ids}; Jordan's private card not shown",
+          and "acct_sayali_card" not in briefing.model_dump_json(),
+          f"{sum(map(len, sections))} items; calc runs {briefing.calc_run_ids}; Sayali's private card not shown",
           briefing.calc_run_ids)
 
     # 12. resume from a reopened checkpoint and ledger ("new process"); the plan is not re-run
@@ -477,19 +477,19 @@ def run_vertical_slice(
     waiting = graph.get_state(config).next if thread_id else ()
     final: dict[str, Any] = {}
     if waiting == ("approval",):  # nothing to resume if the request never paused
-        graph.invoke(Command(resume={"approver": "sam", "approved": True}), config)
-        final = graph.invoke(Command(resume={"approver": "jordan", "approved": True, "note": "slice"}), config)
+        graph.invoke(Command(resume={"approver": "viaan", "approved": True}), config)
+        final = graph.invoke(Command(resume={"approver": "sayali", "approved": True, "note": "slice"}), config)
     thread_events = [(e["action"], e["decision"]) for e in env.store.audit.events(thread_id)]
     check("interrupt_and_resume", "interrupt-and-resume approval without re-running completed steps",
           paused.get("status") == "awaiting_approval" and waiting == ("approval",) and final.get("status") == "approved"
           and thread_events == [("plan_allocation", "info"), ("approve", "deny"), ("approve", "allow")],
-          f"paused at {waiting}; after reopening: sam denied, jordan approved; thread events={thread_events}",
+          f"paused at {waiting}; after reopening: viaan denied, sayali approved; thread events={thread_events}",
           [thread_id])
     ckpt.close()
 
     # 13. no external action is available
     store = env.store
-    refused_job = Supervisor(ALEX, Router(router_model), {}, store.audit, clock=lambda: at).run(
+    refused_job = Supervisor(SOMAL, Router(router_model), {}, store.audit, clock=lambda: at).run(
         EXTERNAL_REQUEST, correlation_id=f"{corr}_external")
     tool_names = {*TOOL_NAMES, *(t["function"]["name"] for t in LEDGER_TOOLS + POLICY_TOOLS)}
     risky = sorted(n for n in tool_names if _EXTERNAL.search(n.replace("_", " ")))

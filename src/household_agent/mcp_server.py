@@ -25,11 +25,11 @@ from household_agent.authz import Authorizer
 from household_agent.categorize import Categorizer
 from household_agent.consent import ConsentStore
 from household_agent.ledger import LedgerStore
-from household_agent.synthetic import ACCOUNTS, ALEX, CASEY_CPA, JORDAN, RULES, SAM
+from household_agent.synthetic import ACCOUNTS, SOMAL, CASEY_CPA, SAYALI, RULES, VIAAN
 from household_agent.tools import ToolSession
 
 SERVER_NAME = "household-finance-tools"
-MEMBERS = {a.member_id: a for a in (ALEX, JORDAN, CASEY_CPA, SAM)}
+MEMBERS = {a.member_id: a for a in (SOMAL, SAYALI, CASEY_CPA, VIAAN)}
 
 
 def build_server(session: ToolSession) -> FastMCP:

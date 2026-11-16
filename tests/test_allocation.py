@@ -33,7 +33,7 @@ from household_agent.allocation_advice import (
     standard_candidates,
 )
 from household_agent.allocation_tool import AllocationFacts, evaluate_allocation_candidates
-from household_agent.synthetic import ALEX, CASEY_CPA, DEMO_AS_OF, SAM
+from household_agent.synthetic import SOMAL, CASEY_CPA, DEMO_AS_OF, VIAAN
 
 CARD = Debt(debt_id="card", balance_minor=500_000, apr_percent="24", minimum_payment_minor=20_000)  # $5,000 at 24%
 ROTH = RetirementAccount(account_id="roth", headroom_minor=700_000)  # $7,000 of room left this year
@@ -257,7 +257,7 @@ def test_standard_candidates_are_deterministic():
 
 # --- the Supervisor-side tool ------------------------------------------------------------
 
-def _call(store, actor=ALEX, **kw):
+def _call(store, actor=SOMAL, **kw):
     args = dict(purpose="capital_allocation", correlation_id="alloc_t", extra_amount_minor=EXTRA,
                 candidates=[CandidatePlan(name="ef", emergency_fund_minor=EXTRA)], facts=facts(), at=DEMO_AS_OF)
     return evaluate_allocation_candidates(store, actor, **{**args, **kw})
@@ -279,7 +279,7 @@ def test_tool_happy_path_records_a_run_and_audits_it(seeded_store):
     assert ev and ev[-1]["resource"] == f"calc:{r['run_id']}" and seeded_store.audit.verify() > 0
 
 
-@pytest.mark.parametrize("actor", [SAM, CASEY_CPA])
+@pytest.mark.parametrize("actor", [VIAAN, CASEY_CPA])
 def test_dependents_and_delegates_are_refused_and_audited(seeded_store, actor):
     before = seeded_store.conn.execute("SELECT COUNT(*) FROM calculation_runs").fetchone()[0]
     r = _call(seeded_store, actor)
@@ -363,7 +363,7 @@ class FnModel:
         return AIMessage(content=self.fn(messages[0].content, json.loads(messages[1].content)))
 
 
-def _sup(seeded_store, model=None, actor=ALEX, **f):
+def _sup(seeded_store, model=None, actor=SOMAL, **f):
     return Supervisor(actor, Router(), {}, seeded_store.audit, clock=lambda: DEMO_AS_OF, ledger=seeded_store,
                       allocation_facts=facts(**f), allocation_model=model)
 
@@ -390,14 +390,14 @@ def test_a_checkpointer_does_not_pause_an_allocation_answer(seeded_store):
 
 
 def test_without_facts_the_older_planner_path_is_used(seeded_store):
-    sup = Supervisor(ALEX, Router(), {}, seeded_store.audit, clock=lambda: DEMO_AS_OF, ledger=seeded_store)
+    sup = Supervisor(SOMAL, Router(), {}, seeded_store.audit, clock=lambda: DEMO_AS_OF, ledger=seeded_store)
     out = sup.run(ASK, correlation_id="j_old")
     assert out["status"] == "failed" and "allocation" not in out
 
 
 def test_a_dependent_is_refused_before_anything_is_evaluated(seeded_store):
     before = seeded_store.conn.execute("SELECT COUNT(*) FROM calculation_runs").fetchone()[0]
-    out = _sup(seeded_store, actor=SAM).run(ASK, correlation_id="j_sam")
+    out = _sup(seeded_store, actor=VIAAN).run(ASK, correlation_id="j_viaan")
     assert out["status"] == "refused" and out["allocation"]["status"] == "denied"
     assert seeded_store.conn.execute("SELECT COUNT(*) FROM calculation_runs").fetchone()[0] == before
 
@@ -416,7 +416,7 @@ def test_no_amount_in_the_question_asks_instead_of_guessing(seeded_store):
 def test_missing_household_facts_are_asked_for_not_invented(seeded_store):
     f = facts()
     del f["debts"]
-    sup = Supervisor(ALEX, Router(), {}, seeded_store.audit, clock=lambda: DEMO_AS_OF, ledger=seeded_store,
+    sup = Supervisor(SOMAL, Router(), {}, seeded_store.audit, clock=lambda: DEMO_AS_OF, ledger=seeded_store,
                      allocation_facts=f)
     out = sup.run(ASK, correlation_id="j_nofacts")
     assert out["allocation"]["status"] == "missing_inputs" and "debts" in out["briefing"]["questions"][0]
