@@ -58,6 +58,43 @@ def test_the_demo_accepts_it_for_sayali_and_refuses_it_for_somal(tmp_path):
         svc.close()
 
 
+def _ask_for_the_month_by_category(tmp_path, claims):
+    """Sayali uploads the card month; a scripted analyst runs category_totals and states ``claims`` in dollars."""
+    from household_agent import webapp
+    from household_agent.vertical_slice import PlaybackChatModel, _call, _final, _results, _txn_ids
+
+    run = lambda m: _call("run_calculation", fn="category_totals", transaction_ids=_txn_ids(m),  # noqa: E731
+                          params={"start": "2026-10-01", "end": "2026-10-31"})
+    final = lambda m: _final(*[{"text": t, "evidence_ids": [_results(m, "run_calculation")[-1]["run_id"]]}  # noqa: E731
+                               for t in claims])
+    model = PlaybackChatModel(steps=[
+        _call("query_ledger", account_ids=["acct_sayali_card"], start="2026-10-01", end="2026-10-31"), run, final])
+    svc = DemoService(tmp_path)
+    try:
+        assert svc.upload("sayali", "card.csv", realistic_card_statement().encode())[0] == 200
+        original, webapp.ledger_playback = webapp.ledger_playback, lambda: model
+        try:
+            return svc.chat("sayali", "break down what we spent last month")
+        finally:
+            webapp.ledger_playback = original
+    finally:
+        svc.close()
+
+
+def test_a_category_total_quoted_in_dollars_is_kept(tmp_path):
+    parsed = parse_statement(realistic_card_statement().encode(), "c.csv")
+    groceries = -sum(r.amount_minor for r in parsed.rows if "SAFEWAY" in r.description)
+    text = f"Groceries were ${groceries // 100:,}.{groceries % 100:02d} last month."
+    out = _ask_for_the_month_by_category(tmp_path, [text])
+    assert [s["text"] for s in out["statements"]] == [text]
+    assert not any("no verified figures" in q for q in out["questions"])
+
+
+def test_a_category_total_that_is_not_in_the_ledger_is_still_removed(tmp_path):
+    out = _ask_for_the_month_by_category(tmp_path, ["Groceries were $999,999.99 last month."])
+    assert out["statements"] == [] and out["needs_review"]
+
+
 def test_an_impossible_month_is_rejected():
     with pytest.raises(ValueError):
         realistic_card_statement(month="2026-13")
