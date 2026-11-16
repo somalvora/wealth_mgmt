@@ -1,7 +1,7 @@
 """The ledger analyst is told which accounts it may read, so a small model need not guess ids."""
 import json
 
-from household_agent.synthetic import ALEX, JORDAN, SAM
+from household_agent.synthetic import SOMAL, SAYALI, VIAAN
 from tests.test_tools import RENTAL, _session
 from tests.test_vertical_slice import _check, _models
 from household_agent.vertical_slice import run_vertical_slice
@@ -12,22 +12,22 @@ def _ids(rows):
 
 
 def test_readable_accounts_matches_list_accounts(seeded_store, categorizer):
-    s = _session(seeded_store, categorizer, ALEX)
-    assert _ids(s.readable_accounts()) == _ids(s.call("list_accounts")["accounts"]) == ["acct_alex_checking", RENTAL]
+    s = _session(seeded_store, categorizer, SOMAL)
+    assert _ids(s.readable_accounts()) == _ids(s.call("list_accounts")["accounts"]) == [RENTAL, "acct_somal_checking"]
 
 
 def test_readable_accounts_charges_no_tool_budget(seeded_store, categorizer):
-    s = _session(seeded_store, categorizer, ALEX, max_calls=1)
+    s = _session(seeded_store, categorizer, SOMAL, max_calls=1)
     s.readable_accounts()
     assert s.calls == 0 and s.call("list_accounts")["ok"]
 
 
 def test_a_dependent_is_told_about_no_accounts(seeded_store, categorizer):
-    assert _session(seeded_store, categorizer, SAM).readable_accounts() == []
+    assert _session(seeded_store, categorizer, VIAAN).readable_accounts() == []
 
 
-def test_jordan_is_not_told_about_alexs_checking(seeded_store, categorizer):
-    assert "acct_alex_checking" not in _ids(_session(seeded_store, categorizer, JORDAN).readable_accounts())
+def test_sayali_is_not_told_about_somals_checking(seeded_store, categorizer):
+    assert "acct_somal_checking" not in _ids(_session(seeded_store, categorizer, SAYALI).readable_accounts())
 
 
 def test_the_specialist_sees_readable_accounts_in_its_first_message(tmp_path):
@@ -40,7 +40,7 @@ def test_the_specialist_sees_readable_accounts_in_its_first_message(tmp_path):
 
     run_vertical_slice(tmp_path, models=_models(ledger=lambda: _Spy(spy)))
     first = json.loads(seen[0][-1].content)
-    assert "acct_alex_checking" in [a["account_id"] for a in first["inputs"]["readable_accounts"]]
+    assert "acct_somal_checking" in [a["account_id"] for a in first["inputs"]["readable_accounts"]]
 
 
 class _Spy:

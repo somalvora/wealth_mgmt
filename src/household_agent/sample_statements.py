@@ -2,10 +2,10 @@
 
 Every file is synthetic. Three are good statements, and two show the guardrails:
 
-- ``2026_10_rental_checking.pdf``  Alex's joint rental account for October 2026 (reconciles);
-- ``2026_10_alex_checking.pdf``    Alex's private checking (reconciles);
-- ``2026_10_jordan_card.pdf``      Jordan's private card: Alex uploading it is refused;
-- ``2026_09_alex_checking_tampered.pdf``  the stated closing balance was edited, so it does not reconcile;
+- ``2026_10_rental_checking.pdf``  Somal's joint rental account for October 2026 (reconciles);
+- ``2026_10_somal_checking.pdf``    Somal's private checking (reconciles);
+- ``2026_10_sayali_card.pdf``      Sayali's private card: Somal uploading it is refused;
+- ``2026_09_somal_checking_tampered.pdf``  the stated closing balance was edited, so it does not reconcile;
 - ``scanned_statement.pdf``        a page with no text layer (what a scan looks like to the parser): rejected.
 
 Output is deterministic (reportlab ``invariant``), so the same bytes (and source hash) come out every time.
@@ -81,7 +81,7 @@ def samples() -> dict[str, Sample]:
         ("2026-10-09", "CITY WATER UTILITY", -11840),
         ("2026-10-18", "SAN MATEO TAX COLLECTOR - SECURED PROPERTY TAX - UNIT B", -320000),
     ])
-    alex = statement_lines("acct_alex_checking", "2026-10-01", "2026-10-31", 920000, [
+    somal = statement_lines("acct_somal_checking", "2026-10-01", "2026-10-31", 920000, [
         ("2026-10-01", "SUMMIT MORTGAGE PMT", -345000),
         ("2026-10-03", "PAYROLL ACME CORP", 410000),
         ("2026-10-11", "PG&E ENERGY BILL", -21237),
@@ -89,26 +89,26 @@ def samples() -> dict[str, Sample]:
         ("2026-10-17", "PAYROLL ACME CORP", 410000),
         ("2026-10-28", "SAFEWAY #1182", -14308),
     ])
-    jordan = statement_lines("acct_jordan_card", "2026-10-01", "2026-10-31", -82000, [
+    sayali = statement_lines("acct_sayali_card", "2026-10-01", "2026-10-31", -82000, [
         ("2026-10-02", "STREAMCO MONTHLY", -1299),
         ("2026-10-07", "SAFEWAY #0457", -9610),
         ("2026-10-15", "CARD PAYMENT THANK YOU", 82000),
         ("2026-10-21", "NOVAPIXEL DIGITAL", -4299),
     ])
-    tampered = statement_lines("acct_alex_checking", "2026-09-01", "2026-09-30", 800000, [
+    tampered = statement_lines("acct_somal_checking", "2026-09-01", "2026-09-30", 800000, [
         ("2026-09-03", "PAYROLL ACME CORP", 410000),
         ("2026-09-10", "SUMMIT MORTGAGE PMT", -345000),
     ], stated_closing=999999)  # the rows end at 8,650.00; someone edited the stated closing balance
     out = [
-        Sample("2026_10_rental_checking.pdf", "alex", "October 2026 joint rental account (includes the $3,200 county tax payment)",
+        Sample("2026_10_rental_checking.pdf", "somal", "October 2026 joint rental account (includes the $3,200 county tax payment)",
                "reconciled", _pdf(rental, "rental checking Oct 2026")),
-        Sample("2026_10_alex_checking.pdf", "alex", "Alex's private checking, October 2026", "reconciled",
-               _pdf(alex, "alex checking Oct 2026")),
-        Sample("2026_10_jordan_card.pdf", "alex", "Jordan's private card: upload it as Alex",
-               "refused: Alex may not write to Jordan's private account", _pdf(jordan, "jordan card Oct 2026")),
-        Sample("2026_09_alex_checking_tampered.pdf", "alex", "September statement with an edited closing balance",
-               "stored as unreconciled and blocked from every calculation", _pdf(tampered, "alex checking Sep 2026")),
-        Sample("scanned_statement.pdf", "alex", "A scanned page: no text layer",
+        Sample("2026_10_somal_checking.pdf", "somal", "Somal's private checking, October 2026", "reconciled",
+               _pdf(somal, "somal checking Oct 2026")),
+        Sample("2026_10_sayali_card.pdf", "somal", "Sayali's private card: upload it as Somal",
+               "refused: Somal may not write to Sayali's private account", _pdf(sayali, "sayali card Oct 2026")),
+        Sample("2026_09_somal_checking_tampered.pdf", "somal", "September statement with an edited closing balance",
+               "stored as unreconciled and blocked from every calculation", _pdf(tampered, "somal checking Sep 2026")),
+        Sample("scanned_statement.pdf", "somal", "A scanned page: no text layer",
                "rejected: OCR is not built", _image_only_pdf()),
     ]
     return {s.name: s for s in out}

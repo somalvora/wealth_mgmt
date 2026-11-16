@@ -568,7 +568,7 @@ class PolicyCompliance:
 
 
 NO_LEDGER_FIGURES = ("The ledger analyst found no verified figures for this question. If the statement it needs is not on "
-                     "file yet (for example this month's), upload it and ask again.")
+                     "file (it may be for a past month or year, or for the current month), upload it and ask again.")
 
 
 # --- routing -----------------------------------------------------------------------------

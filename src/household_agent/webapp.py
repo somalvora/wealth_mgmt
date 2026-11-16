@@ -48,7 +48,7 @@ from household_agent.retrieval import RetrievalService
 from household_agent.sample_statements import samples
 from household_agent.synthetic import (
     ACCOUNTS,
-    ALEX,
+    SOMAL,
     DEMO_AS_OF,
     RULES,
     demo_policy_documents,
@@ -58,10 +58,10 @@ from household_agent.vertical_slice import _planner_kwargs, ledger_playback, pol
 
 STATIC = Path(__file__).parent / "static"
 SUGGESTIONS = [
-    {"member": "alex", "text": "I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual "
+    {"member": "somal", "text": "I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual "
                               "compared with last year, and how should it be accounted for?"},
-    {"member": "alex", "text": "We have a surplus this month; how should we allocate it?"},
-    {"member": "alex", "text": "Please transfer $5,000 from checking to the brokerage."},
+    {"member": "somal", "text": "We have a surplus this month; how should we allocate it?"},
+    {"member": "somal", "text": "Please transfer $5,000 from checking to the brokerage."},
 ]
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_MESSAGE_CHARS = 2000
@@ -100,7 +100,7 @@ class DemoService:
         client = chromadb.PersistentClient(str(self.workdir / "chroma"), settings=Settings(anonymized_telemetry=False))
         self.retrieval = RetrievalService(client, self.embeddings or HashEmbeddings(), self.store.authorizer, self.store.audit)
         ckpt = sqlite3.connect(self.workdir / "checkpoints.db", check_same_thread=False)
-        self.plan_actor = ALEX  # whose reads the planner uses: set per request, under the lock
+        self.plan_actor = SOMAL  # whose reads the planner uses: set per request, under the lock
         self.requesters: dict[str, Actor] = {}  # approval thread -> who asked, so a resume re-derives the same inputs
         runner = _runner(self.store)
 
@@ -128,9 +128,9 @@ class DemoService:
         name = "2025_10_rental_checking.csv"
         if any(d["name"] == name for d in self.documents):
             return  # already seeded: a reused --workdir
-        self._ingest(ALEX, demo_statements()[name].encode(), name, corr)
+        self._ingest(SOMAL, demo_statements()[name].encode(), name, corr)
         for doc in demo_policy_documents():
-            self.retrieval.index(ALEX, doc, correlation_id=corr, at=DEMO_AS_OF)
+            self.retrieval.index(SOMAL, doc, correlation_id=corr, at=DEMO_AS_OF)
 
     def _ingest(self, actor: Actor, content: bytes, name: str, corr: str) -> dict[str, Any]:
         result = ingest_statement(self.store, self.categorizer, actor, content, name, purpose="statement_ingestion",
@@ -203,7 +203,7 @@ class DemoService:
         status = state.get("status")
         current = any(d["name"].startswith("2026_") and d["outcome"] in ("reconciled", "qualified") for d in self.documents)
         note = ("No statements for the current period are on file, so there is no cash to allocate. Upload this month's "
-                "statements (the rental account and Alex's checking) and ask again.") if status == "not_eligible" and not current else None
+                "statements (the rental account and Somal's checking) and ask again.") if status == "not_eligible" and not current else None
         return {"thread_id": thread_id, "status": status, "plan": state.get("plan"),
                 "decision": state.get("decision"), "note": note}
 
@@ -215,7 +215,7 @@ class DemoService:
                 return {"thread_id": thread_id, "status": (before.values or {}).get("status", "not_found"),
                         "refused": True, "reason": "there is no plan waiting for approval under this id"}
             denied_before = before.values.get("denied_attempts", 0)
-            self.plan_actor = self.requesters.get(thread_id, ALEX)
+            self.plan_actor = self.requesters.get(thread_id, SOMAL)
             after = self.approvals.invoke(Command(resume={"approver": approver, "approved": approved, "note": note}), config)
         refused = after.get("status") == "awaiting_approval" and after.get("denied_attempts", 0) > denied_before
         return {"thread_id": thread_id, "status": after.get("status"), "refused": refused,

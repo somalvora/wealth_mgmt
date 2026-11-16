@@ -25,12 +25,12 @@ from household_agent.pipeline import ingest_statement
 from household_agent.plan_inputs import Liability, plan_from_ledger
 from household_agent.synthetic import (
     ACCOUNTS,
-    ALEX,
+    SOMAL,
     CASEY_CPA,
     DEMO_AS_OF,
-    JORDAN,
+    SAYALI,
     RULES,
-    SAM,
+    VIAAN,
     Row,
     cpa_grant,
     demo_planning_inputs,
@@ -40,7 +40,7 @@ from household_agent.synthetic import (
 OCT = date(2026, 10, 1)
 
 
-def _brief(store, actor=ALEX, month=OCT, **kw):
+def _brief(store, actor=SOMAL, month=OCT, **kw):
     return draft_monthly_briefing(store, CalculationRunner(store), actor, month=month, as_of=DEMO_AS_OF,
                                   correlation_id="brief", **kw)
 
@@ -51,7 +51,7 @@ def _kinds(items):
 
 # --- happy path ------------------------------------------------------------------------
 
-def test_alex_october_figures_are_hand_computed(seeded_store):
+def test_somal_october_figures_are_hand_computed(seeded_store):
     b = _brief(seeded_store)
     flow = next(i for i in b.net_worth_and_cash_flow if i.kind == "cash_flow")
     # inflow: rent 3,100 + payroll 2 x 4,100; outflow: mortgage 3,450 + PG&E 212.37 + groceries 329.60
@@ -62,7 +62,7 @@ def test_alex_october_figures_are_hand_computed(seeded_store):
     assert sum(cats.amounts_minor.values()) == flow.amounts_minor["net"]
     closing = {i.text.split()[0]: i.amounts_minor["closing"] for i in b.net_worth_and_cash_flow
                if i.kind == "closing_balance"}
-    assert closing == {"acct_rental_checking": 1657160, "acct_alex_checking": 1340803}
+    assert closing == {"acct_rental_checking": 1657160, "acct_somal_checking": 1340803}
     assert _kinds(b.data_coverage) == ["statement", "statement", "not_shared"]
 
 
@@ -81,8 +81,8 @@ def test_material_events_skip_routine_items_and_list_property_tax(seeded_store):
 
 
 def test_unmapped_high_value_item_is_a_material_event(store, categorizer):
-    ingest_statement(store, categorizer, ALEX, render_statement(
-        "acct_alex_checking", "2026-10-01", "2026-10-31", "5000.00",
+    ingest_statement(store, categorizer, SOMAL, render_statement(
+        "acct_somal_checking", "2026-10-01", "2026-10-31", "5000.00",
         [Row("2026-10-04", "MYSTERY VENDOR 99", "-600.00"), Row("2026-10-05", "MYSTERY VENDOR 98", "-499.99")]
     ).encode(), "x.csv", purpose="statement_ingestion", correlation_id="s", at=DEMO_AS_OF)
     events = _brief(store).material_events
@@ -91,7 +91,7 @@ def test_unmapped_high_value_item_is_a_material_event(store, categorizer):
 
 def test_plan_and_pending_approval_appear_under_actions(seeded_store):
     d = demo_planning_inputs()
-    plan = plan_from_ledger(seeded_store, CalculationRunner(seeded_store), ALEX, as_of=DEMO_AS_OF, correlation_id="p",
+    plan = plan_from_ledger(seeded_store, CalculationRunner(seeded_store), SOMAL, as_of=DEMO_AS_OF, correlation_id="p",
                             contribution_room_minor=d.contribution_room_minor, limits_evidence_id=d.limits_evidence_id,
                             real_return=d.real_return, liabilities=[Liability("county_bill_2026", 320000)],
                             reserve_months=3)
@@ -99,7 +99,7 @@ def test_plan_and_pending_approval_appear_under_actions(seeded_store):
     best, runner_up, pending = b.actions_for_approval
     result, derived, run_id = plan
     assert best.kind == "allocation_scenario" and sum(best.amounts_minor.values()) == derived.inputs.surplus_minor
-    assert run_id in best.evidence_ids and best.provisional  # Jordan's card is left out of Alex's inputs
+    assert run_id in best.evidence_ids and best.provisional  # Sayali's card is left out of Somal's inputs
     assert runner_up.amounts_minor != best.amounts_minor and pending.evidence_ids == ["appr_123"]
     assumptions = next(i for i in b.assumptions_and_limitations if i.kind == "planning_assumptions")
     assert assumptions.amounts_minor["surplus"] == derived.inputs.surplus_minor
@@ -131,16 +131,16 @@ def test_markdown_has_every_section_and_the_disclaimer(seeded_store):
 
 # --- negative paths --------------------------------------------------------------------
 
-def test_jordan_never_sees_alex_private_account(seeded_store):
-    b = _brief(seeded_store, actor=JORDAN)
+def test_sayali_never_sees_somal_private_account(seeded_store):
+    b = _brief(seeded_store, actor=SAYALI)
     dumped = b.model_dump_json()
-    assert "acct_alex_checking" not in dumped and "1340803" not in dumped and "Summit" not in dumped
+    assert "acct_somal_checking" not in dumped and "1340803" not in dumped and "Summit" not in dumped
     assert _kinds(b.data_coverage).count("not_shared") == 1
 
 
 def test_qualified_card_is_provisional_and_needs_confirmation(seeded_store):
-    b = _brief(seeded_store, actor=JORDAN)
-    card = next(i for i in b.data_coverage if "jordan_card" in i.text)
+    b = _brief(seeded_store, actor=SAYALI)
+    card = next(i for i in b.data_coverage if "sayali_card" in i.text)
     assert card.provisional and "possible_duplicate" in card.text
     dup = next(i for i in b.material_events if i.kind == "possible_duplicate")
     assert dup.amounts_minor == {"amount": -9610} and dup.provisional
@@ -154,7 +154,7 @@ def test_qualified_card_is_provisional_and_needs_confirmation(seeded_store):
 def test_corrupt_statement_contributes_no_numbers(seeded_store):
     b = _brief(seeded_store, month=date(2026, 9, 1))
     assert b.net_worth_and_cash_flow == [] and b.calc_run_ids == []
-    assert "unreconciled" in b.data_coverage[0].text
+    assert any("unreconciled" in i.text for i in b.data_coverage)
     assert "unreconciled_excluded" in _kinds(b.assumptions_and_limitations)
     assert "999999" not in b.model_dump_json()
 
@@ -165,7 +165,7 @@ def test_month_without_statements_reports_missing_sources(seeded_store):
     assert b.material_events == [] and b.calc_run_ids == []
 
 
-@pytest.mark.parametrize("actor", [SAM, CASEY_CPA])
+@pytest.mark.parametrize("actor", [VIAAN, CASEY_CPA])
 def test_dependent_and_tax_only_delegate_get_no_ledger_data(seeded_store, actor):
     seeded_store.authorizer.add_grant(cpa_grant(expires_at=DEMO_AS_OF.replace(year=2027)))
     b = _brief(seeded_store, actor=actor)
@@ -203,9 +203,9 @@ _rows = st.lists(st.tuples(st.integers(1, 28), st.sampled_from(["SAFEWAY #1", "P
 def test_category_totals_sum_to_net_cash_flow_and_amounts_cite_evidence(rows):
     conn = sqlite3.connect(":memory:")
     store = LedgerStore(conn, Authorizer(ACCOUNTS), AuditLog(conn))
-    text = render_statement("acct_alex_checking", "2026-10-01", "2026-10-31", "100000.00",
+    text = render_statement("acct_somal_checking", "2026-10-01", "2026-10-31", "100000.00",
                             [Row(f"2026-10-{d:02d}", m, f"{a / 100:.2f}") for d, m, a in rows])
-    ingest_statement(store, Categorizer(RULES), ALEX, text.encode(), "p.csv", purpose="statement_ingestion",
+    ingest_statement(store, Categorizer(RULES), SOMAL, text.encode(), "p.csv", purpose="statement_ingestion",
                      correlation_id="s", at=DEMO_AS_OF)
     b = _brief(store)
     flow = next((i for i in b.net_worth_and_cash_flow if i.kind == "cash_flow"), None)

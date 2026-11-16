@@ -26,12 +26,12 @@ from household_agent.retrieval import (
     validate_claims,
 )
 from household_agent.synthetic import (
-    ALEX,
+    SOMAL,
     CASEY_CPA,
     DEMO_AS_OF,
     HOUSEHOLD,
-    JORDAN,
-    SAM,
+    SAYALI,
+    VIAAN,
     demo_policy_documents,
     demo_statements,
 )
@@ -46,7 +46,7 @@ def service(tmp_path, store):
     client = chromadb.PersistentClient(str(tmp_path / "chroma"), settings=Settings(anonymized_telemetry=False))
     svc = RetrievalService(client, HashEmbeddings(), store.authorizer, store.audit)
     for d in demo_policy_documents():
-        owner = ALEX if d.account_id != "acct_jordan_card" else JORDAN
+        owner = SOMAL if d.account_id != "acct_sayali_card" else SAYALI
         svc.index(owner, d, correlation_id="idx", at=AT)
     return svc
 
@@ -59,7 +59,7 @@ def _docs(result):
     return {p["metadata"]["doc_id"] for p in result["passages"]}
 
 
-def _retrieve(svc, actor=ALEX, purpose="historical_comparison", query=QUERY, **kw):
+def _retrieve(svc, actor=SOMAL, purpose="historical_comparison", query=QUERY, **kw):
     return svc.retrieve_verified(actor, purpose, query, correlation_id="r1", at=AT,
                                  collections=("policies_compliance",), **kw)
 
@@ -72,32 +72,32 @@ def test_owner_retrieves_verified_tier1_bill(service):
 
 
 def test_private_document_is_never_a_candidate_for_another_member(service):
-    alex_text = "Alex plans to pay the Unit B property tax from a private bonus"
-    assert "alex_private_note" in _docs(_retrieve(service, ALEX, query=alex_text))
-    out = _retrieve(service, JORDAN, purpose="budgeting", query=alex_text)
-    assert "alex_private_note" not in _docs(out)
+    somal_text = "Somal plans to pay the Unit B property tax from a private bonus"
+    assert "somal_private_note" in _docs(_retrieve(service, SOMAL, query=somal_text))
+    out = _retrieve(service, SAYALI, purpose="budgeting", query=somal_text)
+    assert "somal_private_note" not in _docs(out)
     audit = _details(service.audit.events("r1")[-1])
-    assert "acct_alex_checking" not in audit["scopes"]
-    assert not any(c.startswith("alex_private_note") for c in audit["candidates"])
+    assert "acct_somal_checking" not in audit["scopes"]
+    assert not any(c.startswith("somal_private_note") for c in audit["candidates"])
 
 
 def test_consent_grant_and_revocation_take_effect_immediately(service, conn):
     consents = ConsentStore(conn, service.authorizer, service.audit)
-    grant = ConsentGrant("g_alex_jordan", HOUSEHOLD, "alex", "jordan", frozenset({"acct_alex_checking"}),
+    grant = ConsentGrant("g_somal_sayali", HOUSEHOLD, "somal", "sayali", frozenset({"acct_somal_checking"}),
                          frozenset({Action.RETRIEVE}), frozenset({"budgeting"}), AT - timedelta(days=1), None, "v1")
-    consents.grant(ALEX, grant, correlation_id="g", at=AT)
-    q = "Alex private bonus property tax"
-    assert "alex_private_note" in _docs(_retrieve(service, JORDAN, purpose="budgeting", query=q))
+    consents.grant(SOMAL, grant, correlation_id="g", at=AT)
+    q = "Somal private bonus property tax"
+    assert "somal_private_note" in _docs(_retrieve(service, SAYALI, purpose="budgeting", query=q))
     # purpose-scoped: a different purpose still sees nothing
-    assert "alex_private_note" not in _docs(_retrieve(service, JORDAN, purpose="tax_preparation", query=q))
-    consents.revoke(ALEX, "g_alex_jordan", correlation_id="g", at=AT)
-    assert "alex_private_note" not in _docs(_retrieve(service, JORDAN, purpose="budgeting", query=q))
+    assert "somal_private_note" not in _docs(_retrieve(service, SAYALI, purpose="tax_preparation", query=q))
+    consents.revoke(SOMAL, "g_somal_sayali", correlation_id="g", at=AT)
+    assert "somal_private_note" not in _docs(_retrieve(service, SAYALI, purpose="budgeting", query=q))
 
 
 def test_delegate_sees_only_public_sources_and_dependent_sees_nothing(service):
     cpa = _retrieve(service, CASEY_CPA, purpose="tax_preparation", query="rental property tax deductible")
     assert _docs(cpa) == {"irs_rental_2025"}
-    assert _retrieve(service, SAM, query="rent")["passages"] == []
+    assert _retrieve(service, VIAAN, query="rent")["passages"] == []
 
 
 def test_household_isolation(service):
@@ -116,10 +116,10 @@ def test_missing_purpose_or_query_is_rejected(service, purpose, query):
 def test_non_owner_cannot_index_into_private_account(service):
     note = replace(demo_policy_documents()[5], doc_id="forged_note")
     with pytest.raises(AuthorizationError):
-        service.index(JORDAN, note, correlation_id="x", at=AT)
+        service.index(SAYALI, note, correlation_id="x", at=AT)
     public_by_child = replace(demo_policy_documents()[3], doc_id="kid_pub")
     with pytest.raises(AuthorizationError):
-        service.index(SAM, public_by_child, correlation_id="x", at=AT)
+        service.index(VIAAN, public_by_child, correlation_id="x", at=AT)
 
 
 def test_expired_source_is_returned_but_not_citable(service):
@@ -213,12 +213,12 @@ def test_financial_history_statement_retrieval_with_period_filter(service):
     text = demo_statements()["2026_10_rental_checking.csv"]
     doc = SourceDocument("st_rental_2026_10", HOUSEHOLD, "financial_history", "acct_rental_checking", "r.csv",
                          "bank_statement", 2, "Bank", text, statement_period="2026-10")
-    service.index(ALEX, doc, correlation_id="idx", at=AT)
+    service.index(SOMAL, doc, correlation_id="idx", at=AT)
     q = "San Mateo County Tax Collector"
-    hit = service.retrieve_verified(ALEX, "historical_comparison", q, correlation_id="r2", at=AT,
+    hit = service.retrieve_verified(SOMAL, "historical_comparison", q, correlation_id="r2", at=AT,
                                     collections=("financial_history",), statement_periods=["2026-10"])
     assert _docs(hit) == {"st_rental_2026_10"}
-    miss = service.retrieve_verified(ALEX, "historical_comparison", q, correlation_id="r2", at=AT,
+    miss = service.retrieve_verified(SOMAL, "historical_comparison", q, correlation_id="r2", at=AT,
                                      collections=("financial_history",), statement_periods=["2025-10"])
     assert miss["passages"] == []
 

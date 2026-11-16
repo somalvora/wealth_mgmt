@@ -25,7 +25,7 @@ from household_agent.allocation_advice import CHOOSE_PROMPT, PROPOSE_PROMPT
 from household_agent.llm import HashEmbeddings
 from household_agent.mcp_server import MEMBERS
 from household_agent.retrieval import RetrievalService
-from household_agent.synthetic import ALEX, DEMO_AS_OF, SAM, demo_policy_documents
+from household_agent.synthetic import SOMAL, DEMO_AS_OF, VIAAN, demo_policy_documents
 from tests.test_allocation import ASK, FnModel, facts
 
 
@@ -60,13 +60,13 @@ def retrieval(tmp_path, seeded_store):
     client = chromadb.PersistentClient(str(tmp_path / "chroma"), settings=Settings(anonymized_telemetry=False))
     svc = RetrievalService(client, HashEmbeddings(), seeded_store.authorizer, seeded_store.audit)
     for d in demo_policy_documents():
-        svc.index(ALEX, d, correlation_id="idx", at=DEMO_AS_OF)
+        svc.index(SOMAL, d, correlation_id="idx", at=DEMO_AS_OF)
     return svc
 
 
 def _policy(retrieval, steps):
     model = Scripted(steps=steps, seen=[])
-    return model, PolicyCompliance(model, retrieval, ALEX, clock=lambda: DEMO_AS_OF)
+    return model, PolicyCompliance(model, retrieval, SOMAL, clock=lambda: DEMO_AS_OF)
 
 
 # --- Policy JSON repair ----------------------------------------------------------------------
@@ -136,7 +136,7 @@ def _bad_pick():
     return FnModel(fn)
 
 
-def _sup(store, model=None, actor=ALEX, **f):
+def _sup(store, model=None, actor=SOMAL, **f):
     return Supervisor(actor, Router(), {}, store.audit, clock=lambda: DEMO_AS_OF, ledger=store,
                       allocation_facts=facts(**f), allocation_model=model, members=MEMBERS,
                       authorizer=store.authorizer)
@@ -164,29 +164,29 @@ def test_a_flagged_allocation_pauses_for_review_with_a_checkpointer(seeded_store
 
 def test_an_authorized_accept_resumes_to_a_reviewed_briefing(seeded_store):
     sup, saver, _ = _flagged(seeded_store)
-    done = sup.resume("j_ar", {"reviewer": "jordan", "accepted": True, "note": "ok"}, checkpointer=saver)
+    done = sup.resume("j_ar", {"reviewer": "sayali", "accepted": True, "note": "ok"}, checkpointer=saver)
     a = done["briefing"]["allocation"]
     assert done["status"] == "reviewed" and a["review"]["accepted"] is True
     assert a["recommended"] == "all_to_emergency_fund" and done["briefing"]["statements"]
-    assert _reviews(seeded_store, "j_ar") == [("jordan", "allow")]
+    assert _reviews(seeded_store, "j_ar") == [("sayali", "allow")]
     assert seeded_store.audit.verify() > 0
 
 
 def test_a_rejection_withholds_the_recommendation(seeded_store):
     sup, saver, _ = _flagged(seeded_store)
-    done = sup.resume("j_ar", {"reviewer": "alex", "accepted": False, "note": "no"}, checkpointer=saver)
+    done = sup.resume("j_ar", {"reviewer": "somal", "accepted": False, "note": "no"}, checkpointer=saver)
     a = done["briefing"]["allocation"]
     assert done["status"] == "review_rejected" and a["recommended"] is None
     assert not done["briefing"]["statements"]
 
 
-@pytest.mark.parametrize("reviewer", ["sam", "casey_cpa", "mallory", ""])
+@pytest.mark.parametrize("reviewer", ["viaan", "casey_cpa", "mallory", ""])
 def test_an_unauthorized_reviewer_is_refused_and_the_job_keeps_waiting(seeded_store, reviewer):
     sup, saver, _ = _flagged(seeded_store)
     out = sup.resume("j_ar", {"reviewer": reviewer, "accepted": True}, checkpointer=saver)
     assert out["status"] == "awaiting_review" and out["allocation_review_denied_attempts"] == 1 and out["__interrupt__"]
     assert _reviews(seeded_store, "j_ar") == [(reviewer or "unknown", "deny")]
-    assert sup.resume("j_ar", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+    assert sup.resume("j_ar", {"reviewer": "somal", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
 
 
 def test_repeated_denied_attempts_block_the_job_and_recommend_nothing(seeded_store):
@@ -203,7 +203,7 @@ def test_resume_adds_no_duplicate_run_or_audit_events(seeded_store):
     sup, saver, _ = _flagged(seeded_store)
     runs = seeded_store.conn.execute("SELECT COUNT(*) FROM calculation_runs").fetchone()[0]
     allocs = len([e for e in seeded_store.audit.events("j_ar") if e["action"] == "allocate"])
-    sup.resume("j_ar", {"reviewer": "alex", "accepted": True}, checkpointer=saver)
+    sup.resume("j_ar", {"reviewer": "somal", "accepted": True}, checkpointer=saver)
     assert seeded_store.conn.execute("SELECT COUNT(*) FROM calculation_runs").fetchone()[0] == runs
     assert len([e for e in seeded_store.audit.events("j_ar") if e["action"] == "allocate"]) == allocs == 1
 
@@ -216,7 +216,7 @@ def test_a_clean_recommendation_does_not_pause(seeded_store):
 def test_missing_inputs_and_denied_do_not_pause(seeded_store):
     out = _sup(seeded_store).run("where should our extra money go?", correlation_id="j_m", checkpointer=InMemorySaver())
     assert out["allocation"]["status"] == "missing_inputs" and "__interrupt__" not in out
-    out = _sup(seeded_store, actor=SAM).run(ASK, correlation_id="j_d", checkpointer=InMemorySaver())
+    out = _sup(seeded_store, actor=VIAAN).run(ASK, correlation_id="j_d", checkpointer=InMemorySaver())
     assert out["status"] == "refused" and "__interrupt__" not in out
 
 
@@ -226,7 +226,7 @@ def test_without_a_checkpointer_a_flagged_allocation_is_just_needs_review(seeded
 
 
 @settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(decision=st.fixed_dictionaries({"reviewer": st.sampled_from(["alex", "jordan"]), "accepted": st.booleans(),
+@given(decision=st.fixed_dictionaries({"reviewer": st.sampled_from(["somal", "sayali"]), "accepted": st.booleans(),
                                        "note": st.text(max_size=20)}))
 def test_property_an_authorized_decision_always_ends_the_pause(seeded_store, decision):
     cid = f"j_p_{abs(hash(json.dumps(decision, sort_keys=True)))}"
