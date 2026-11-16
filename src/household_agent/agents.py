@@ -69,6 +69,7 @@ from household_agent.allocation_tool import evaluate_allocation_candidates, reso
 from household_agent.approval import APPROVER_ROLES, start_request
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor, Authorizer
+from household_agent.calc_runner import params_help
 from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
 from household_agent.models import Action
@@ -231,7 +232,8 @@ LEDGER_TOOLS = [
         ["account_ids", "start", "end"]),
     _fn("ingest_statement", "Parse, reconcile and store a CSV statement supplied in the task (needs upload rights).",
         {"csv_text": {"type": "string"}, "source_name": {"type": "string"}}, ["csv_text", "source_name"]),
-    _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions, recurring_drift or cluster_risk.",
+    _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions, recurring_drift or "
+                           "cluster_risk. Required params (ISO dates): " + params_help() + ".",
         {"fn": {"type": "string"}, "transaction_ids": _STR_LIST, "params": {"type": "object"},
          "allow_provisional": {"type": "boolean"}}, ["fn", "transaction_ids"]),
 ]
