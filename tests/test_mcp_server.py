@@ -16,7 +16,7 @@ from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
 from household_agent.mcp_server import build_server, session_from_env
 from household_agent.pipeline import ingest_statement
-from household_agent.synthetic import ACCOUNTS, ALEX, DEMO_AS_OF, JORDAN, RULES, demo_statements
+from household_agent.synthetic import ACCOUNTS, SOMAL, DEMO_AS_OF, SAYALI, RULES, demo_statements
 from household_agent.tools import TOOL_NAMES, ToolSession
 
 TAX = "San Mateo County Tax Collector"
@@ -27,7 +27,7 @@ def _result(call_result) -> dict:
     return json.loads(call_result.content[0].text)
 
 
-def _session(store, categorizer, actor=ALEX, purpose="historical_comparison"):
+def _session(store, categorizer, actor=SOMAL, purpose="historical_comparison"):
     return ToolSession(store, categorizer, actor, purpose, correlation_id="mcp_t", clock=lambda: DEMO_AS_OF)
 
 
@@ -56,9 +56,9 @@ def test_query_and_calculate_over_mcp(seeded_store, categorizer):
 
 def test_denial_comes_back_as_data_over_mcp(seeded_store, categorizer):
     async def go():
-        session = _session(seeded_store, categorizer, JORDAN, "budgeting")
+        session = _session(seeded_store, categorizer, SAYALI, "budgeting")
         async with create_connected_server_and_client_session(build_server(session)) as c:
-            return _result(await c.call_tool("query_ledger", {"account_ids": ["acct_alex_checking"],
+            return _result(await c.call_tool("query_ledger", {"account_ids": ["acct_somal_checking"],
                                                               "start": "2026-10-01", "end": "2026-10-31"}))
 
     assert asyncio.run(go())["error"]["type"] == "authorization_denied"
@@ -77,7 +77,7 @@ def test_langchain_adapter_tools(seeded_store, categorizer):
     assert json.loads(block["text"])["transactions"][1]["amount_minor"] == -320000
 
 
-@pytest.mark.parametrize("env", [{}, {"HH_LEDGER_DB": "x.db", "HH_ACTOR": "alex"},
+@pytest.mark.parametrize("env", [{}, {"HH_LEDGER_DB": "x.db", "HH_ACTOR": "somal"},
                                  {"HH_LEDGER_DB": "x.db", "HH_ACTOR": "mallory", "HH_PURPOSE": "budgeting"}])
 def test_server_refuses_to_start_without_a_known_identity(env, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -89,29 +89,29 @@ def test_stdio_subprocess_end_to_end(tmp_path):
     db = tmp_path / "ledger.db"
     conn = sqlite3.connect(db)
     store = LedgerStore(conn, Authorizer(ACCOUNTS), AuditLog(conn))
-    ingest_statement(store, Categorizer(RULES), ALEX, demo_statements()["2026_10_rental_checking.csv"].encode(),
+    ingest_statement(store, Categorizer(RULES), SOMAL, demo_statements()["2026_10_rental_checking.csv"].encode(),
                      "r.csv", purpose="statement_ingestion", correlation_id="seed", at=DEMO_AS_OF)
     conn.close()
 
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "household_agent.mcp_server"],
-        env={**os.environ, "HH_LEDGER_DB": str(db), "HH_ACTOR": "jordan", "HH_PURPOSE": "budgeting"},
+        env={**os.environ, "HH_LEDGER_DB": str(db), "HH_ACTOR": "sayali", "HH_PURPOSE": "budgeting"},
     )
 
     async def go():
         async with stdio_client(params) as (read, write), ClientSession(read, write) as c:
             await c.initialize()
             accounts = _result(await c.call_tool("list_accounts", {}))
-            denied = _result(await c.call_tool("query_ledger", {"account_ids": ["acct_alex_checking"],
+            denied = _result(await c.call_tool("query_ledger", {"account_ids": ["acct_somal_checking"],
                                                                 "start": "2026-10-01", "end": "2026-10-31"}))
             joint = _result(await c.call_tool("query_ledger", {"account_ids": ["acct_rental_checking"],
                                                                "start": "2026-10-01", "end": "2026-10-31"}))
             return accounts, denied, joint
 
     accounts, denied, joint = asyncio.run(asyncio.wait_for(go(), timeout=60))
-    assert [a["account_id"] for a in accounts["accounts"]] == ["acct_jordan_card", "acct_rental_checking"]
+    assert [a["account_id"] for a in accounts["accounts"]] == ["acct_rental_checking", "acct_sayali_card"]
     assert denied["error"]["type"] == "authorization_denied"
     assert len(joint["transactions"]) == 4
 
     events = AuditLog(sqlite3.connect(db)).events()
-    assert any(e["actor_id"] == "jordan" and e["decision"] == "deny" for e in events)
+    assert any(e["actor_id"] == "sayali" and e["decision"] == "deny" for e in events)

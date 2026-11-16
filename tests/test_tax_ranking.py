@@ -12,7 +12,7 @@ from household_agent.allocation import (
     evaluate_candidates,
 )
 from household_agent.allocation_tool import evaluate_allocation_candidates
-from household_agent.synthetic import ALEX, DEMO_AS_OF
+from household_agent.synthetic import SOMAL, DEMO_AS_OF
 from tests.test_allocation import facts
 
 LOW_APR = Debt(debt_id="card", balance_minor=500_000, apr_percent="2", minimum_payment_minor=20_000)
@@ -87,7 +87,7 @@ def test_invalid_tax_rates_are_rejected(bad):
 def test_the_rate_reaches_the_stored_run_through_the_tool(seeded_store):
     f = facts(retirement_accounts=[{"account_id": "roth", "headroom_minor": 700_000, "tax_deferred_rate_percent": "22"}])
     r = evaluate_allocation_candidates(
-        seeded_store, ALEX, purpose="capital_allocation", correlation_id="alloc_tax", extra_amount_minor=X,
+        seeded_store, SOMAL, purpose="capital_allocation", correlation_id="alloc_tax", extra_amount_minor=X,
         candidates=[CandidatePlan(name="r", retirement_minor={"roth": X})], facts=f, at=DEMO_AS_OF)
     c = r["output"]["candidates"][0]
     assert r["ok"] and c["tax_benefit_minor"] == 44_000 and c["tax_benefit_display"] == "$440.00"

@@ -18,7 +18,7 @@ from household_agent.pipeline import ingest_statement
 from household_agent.planning import plan_allocation
 from household_agent.synthetic import demo_planning_inputs
 from household_agent.synthetic import (
-    ACCOUNTS, ALEX, DEMO_AS_OF, DEMO_OCTOBERS, HOUSEHOLD, JORDAN, RULES, demo_statements,
+    ACCOUNTS, SOMAL, DEMO_AS_OF, DEMO_OCTOBERS, HOUSEHOLD, SAYALI, RULES, demo_statements,
 )
 
 
@@ -29,9 +29,9 @@ def main() -> None:
     corr = f"corr_demo_{uuid.uuid4().hex[:8]}"
 
     print("1. Ingest synthetic statements (owner uploads)")
-    owners = {"jordan_card": JORDAN}
+    owners = {"sayali_card": SAYALI}
     for name, content in demo_statements().items():
-        actor = next((a for key, a in owners.items() if key in name), ALEX)
+        actor = next((a for key, a in owners.items() if key in name), SOMAL)
         r = ingest_statement(store, categorizer, actor, content.encode(), name,
                              purpose="statement_ingestion", correlation_id=corr, at=DEMO_AS_OF)
         flag = " [unverified]" if r.unverified else ""
@@ -41,11 +41,11 @@ def main() -> None:
 
     print("\n2. Year-over-year property-tax comparison (Ledger Analyst path)")
     txns = store.query_transactions(
-        ALEX, "historical_comparison", corr, ["acct_rental_checking"], *DEMO_OCTOBERS,
+        SOMAL, "historical_comparison", corr, ["acct_rental_checking"], *DEMO_OCTOBERS,
         merchant_normalized="San Mateo County Tax Collector", at=DEMO_AS_OF,
     )
     run = CalculationRunner(store).run(
-        "variance_between_transactions", txns, actor_id=ALEX.member_id, household_id=HOUSEHOLD,
+        "variance_between_transactions", txns, actor_id=SOMAL.member_id, household_id=HOUSEHOLD,
         correlation_id=corr, acting_agent="ledger_analyst",
     )
     out = run.output
@@ -53,14 +53,14 @@ def main() -> None:
     print(f"   Variance: {format_minor(out['dollar_variance_minor'])} ({out['pct_variance']}%)  run_id={run.run_id}")
     print(f"   input_hash={run.input_hash[:23]}...  library=household_finance {run.library_version}")
 
-    print("\n3. Guardrail: Jordan tries to read Alex's private checking")
+    print("\n3. Guardrail: Sayali tries to read Somal's private checking")
     try:
-        store.query_transactions(JORDAN, "budgeting", corr, ["acct_alex_checking"], *DEMO_OCTOBERS, at=DEMO_AS_OF)
+        store.query_transactions(SAYALI, "budgeting", corr, ["acct_somal_checking"], *DEMO_OCTOBERS, at=DEMO_AS_OF)
     except AuthorizationError as exc:
         print(f"   DENIED: {exc}")
 
     print("\n4. Guardrail: the corrupt September statement is excluded from calculations")
-    sept = store.query_transactions(ALEX, "budgeting", corr, ["acct_alex_checking"],
+    sept = store.query_transactions(SOMAL, "budgeting", corr, ["acct_somal_checking"],
                                     date(2026, 9, 1), date(2026, 9, 30), include_provisional=True, at=DEMO_AS_OF)
     print(f"   September transactions available to calculations: {len(sept)}")
 
