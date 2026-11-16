@@ -729,7 +729,8 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
     intent = state["routing"]["intent"]
     ledger = [r for r in results if r.agent == "ledger_analyst"]
     no_figures = ([NO_LEDGER_FIGURES] if intent != "statement_ingestion" and ledger
-                  and not any(r.claims or r.questions for r in ledger) else [])
+                  and not any(r.claims or r.questions for r in ledger)
+                  and not any(r.status == "failed" for r in ledger) else [])  # a crash is reported as itself, not as a missing statement
     return {
         "intent": intent,
         "statements": [{"text": c.text, "evidence_ids": c.evidence_ids, "agent": r.agent}
