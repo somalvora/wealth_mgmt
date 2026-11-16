@@ -154,6 +154,12 @@ def test_a_money_movement_request_is_refused(client):
     assert body["status"] == "refused" and not body["statements"]
 
 
+def test_an_unrelated_question_is_out_of_scope_and_the_page_says_so(client):
+    body = client.post("/api/chat", json={"member": "alex", "message": "What's the weather in Boston?"}).json()
+    assert body["intent"] == "out_of_scope" and not body["statements"] and not body["approval"]
+    assert "outside what I can help with" in (STATIC / "demo.html").read_text()
+
+
 def test_allocation_waits_for_an_adult_and_a_dependent_cannot_approve(client):
     for name in ("2026_10_rental_checking.pdf", "2026_10_alex_checking.pdf", "2026_10_jordan_card.pdf"):
         upload(client, name, member="jordan" if "jordan" in name else "alex")
