@@ -3,6 +3,8 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from household_agent.authz import AuthorizationError
 from household_agent.calc_runner import CalculationRunner, IneligibleInputError
@@ -104,6 +106,42 @@ def test_calculation_rejects_provisional_unless_allowed(loaded):
     run = runner.run("cash_flow", card, actor_id="sayali", household_id=HOUSEHOLD, correlation_id=CORR,
                      params=params, allow_provisional=True)
     assert run.provisional and run.output["net_minor"] == 820_00 - 1299 - 9610 * 2 - 4299
+
+
+def _card(loaded):
+    return loaded.query_transactions(SAYALI, "budgeting", CORR, ["acct_sayali_card"], *OCTS,
+                                     include_provisional=True, at=DEMO_AS_OF)
+
+
+def _flow(loaded, card, **extra):
+    return CalculationRunner(loaded).run(
+        "cash_flow", card, actor_id="sayali", household_id=HOUSEHOLD, correlation_id=CORR, allow_provisional=True,
+        params={"start": "2026-10-01", "end": "2026-10-31", **extra}).output
+
+
+def test_cash_flow_can_leave_out_transfers_such_as_a_card_payment(loaded):
+    card = _card(loaded)
+    assert [t.category for t in card if t.amount_minor > 0] == ["transfer"]
+    everything = _flow(loaded, card)
+    spending_only = _flow(loaded, card, exclude_categories=["transfer"])
+    assert everything["inflow_minor"] == 820_00  # the payment looks like money in
+    assert spending_only["inflow_minor"] == 0 and spending_only["outflow_minor"] == everything["outflow_minor"]
+    assert spending_only["net_minor"] == -everything["outflow_minor"]
+
+
+@pytest.mark.parametrize("bad", ["transfer", {"transfer": 1}, 5])
+def test_exclude_categories_must_be_a_list(loaded, bad):
+    with pytest.raises(ValueError, match="list of category names"):
+        _flow(loaded, _card(loaded), exclude_categories=bad)
+
+
+@given(skip=st.lists(st.sampled_from(["transfer", "groceries", "entertainment", "nothing_like_this"]), max_size=4))
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_property_excluding_categories_never_adds_money(skip, loaded):
+    card = _card(loaded)
+    base, less = _flow(loaded, card), _flow(loaded, card, exclude_categories=skip)
+    assert less["inflow_minor"] <= base["inflow_minor"] and less["outflow_minor"] <= base["outflow_minor"]
+    assert less["net_minor"] == less["inflow_minor"] - less["outflow_minor"]
 
 
 def test_unknown_calculation_is_rejected(loaded):
