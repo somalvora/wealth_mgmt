@@ -375,6 +375,12 @@ def _with_money(output: Any) -> Any:
     return output
 
 
+def _category_displays(totals: Mapping[str, int]) -> dict[str, Any]:
+    """``category_totals`` returns {category: cents} with no ``*_minor`` keys, so add "$274.85" beside each total;
+    otherwise a claim quoting a category in dollars finds no matching number and is removed."""
+    return {**totals, **{f"{c}_display": format_minor(v) for c, v in totals.items()}}
+
+
 def _status(loop: _LoopState, parse_error: str | None, review: bool) -> Status:
     if loop.get("status"):
         return loop["status"]
@@ -462,7 +468,8 @@ class LedgerAnalyst:
             elif o["tool"] == "run_calculation":
                 # a run's inputs are its provenance, so "October 2025" in a claim citing it is supported
                 inputs = [evidence[i] for i in r["input_ids"] if i in evidence]
-                evidence[r["run_id"]] = {**_with_money(r["output"]), "inputs": inputs}
+                evidence[r["run_id"]] = {**_with_money(_category_displays(r["output"]) if r["fn"] == "category_totals"
+                                                       else r["output"]), "inputs": inputs}
                 # category picks the review threshold; account_ids scope who may resolve a review
                 categories = {t["category"] for t in inputs}
                 calculations.append({**r["output"], "calc_run_id": r["run_id"], "provisional": r["provisional"],
