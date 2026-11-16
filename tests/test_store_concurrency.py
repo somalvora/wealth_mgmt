@@ -16,10 +16,10 @@ from household_agent.categorize import Categorizer
 from household_agent.consent import ConsentStore
 from household_agent.ledger import DuplicateDocumentError, LedgerStore
 from household_agent.pipeline import ingest_statement
-from household_agent.synthetic import ACCOUNTS, ALEX, DEMO_AS_OF, RULES, cpa_grant, demo_statements
+from household_agent.synthetic import ACCOUNTS, SOMAL, DEMO_AS_OF, RULES, cpa_grant, demo_statements
 from household_agent.vertical_slice import _Env
 
-CSV = demo_statements()["2026_10_alex_checking.csv"].encode()
+CSV = demo_statements()["2026_10_somal_checking.csv"].encode()
 
 
 def _stores():
@@ -34,7 +34,7 @@ def _race_ingests(store, n):
     def go(i):
         barrier.wait()
         try:
-            ingest_statement(store, Categorizer(RULES), ALEX, CSV, "s.csv", purpose="statement_ingestion",
+            ingest_statement(store, Categorizer(RULES), SOMAL, CSV, "s.csv", purpose="statement_ingestion",
                              correlation_id=f"c{i}", at=DEMO_AS_OF)
             outcomes.append("ok")
         except DuplicateDocumentError:
@@ -88,7 +88,7 @@ def test_a_failing_ingest_rolls_back_fully_while_other_threads_append_audit_even
 
     def appender():
         while not stop.is_set() or len(appended) < 100:
-            store.audit.append(correlation_id="bg", actor_id="alex", household_id="hh_demo", action="bg",
+            store.audit.append(correlation_id="bg", actor_id="somal", household_id="hh_demo", action="bg",
                                decision="info")
             appended.append(1)
 
@@ -96,7 +96,7 @@ def test_a_failing_ingest_rolls_back_fully_while_other_threads_append_audit_even
     t.start()
     try:
         with pytest.raises(RuntimeError, match="disk full"):
-            ingest_statement(store, Categorizer(RULES), ALEX, CSV, "s.csv", purpose="statement_ingestion",
+            ingest_statement(store, Categorizer(RULES), SOMAL, CSV, "s.csv", purpose="statement_ingestion",
                              correlation_id="c", at=DEMO_AS_OF)
     finally:
         stop.set()
@@ -113,10 +113,10 @@ def test_the_failed_statement_can_be_ingested_again_afterwards(monkeypatch):
     real = store._insert_txn
     monkeypatch.setattr(store, "_insert_txn", lambda t: (_ for _ in ()).throw(RuntimeError("x")))
     with pytest.raises(RuntimeError):
-        ingest_statement(store, Categorizer(RULES), ALEX, CSV, "s.csv", purpose="statement_ingestion",
+        ingest_statement(store, Categorizer(RULES), SOMAL, CSV, "s.csv", purpose="statement_ingestion",
                          correlation_id="c1", at=DEMO_AS_OF)
     monkeypatch.setattr(store, "_insert_txn", real)
-    ingest_statement(store, Categorizer(RULES), ALEX, CSV, "s.csv", purpose="statement_ingestion",
+    ingest_statement(store, Categorizer(RULES), SOMAL, CSV, "s.csv", purpose="statement_ingestion",
                      correlation_id="c2", at=DEMO_AS_OF)
     assert store.audit.verify() == 3
 
@@ -125,7 +125,7 @@ def test_the_three_stores_share_one_reentrant_lock():
     _, store, consent = _stores()
     assert consent._audit.lock is store.audit.lock
     with store.audit.lock, store.audit.lock:  # re-entrant: a store may append to the audit log while holding it
-        store.audit.append(correlation_id="c", actor_id="alex", household_id="hh_demo", action="x", decision="info")
+        store.audit.append(correlation_id="c", actor_id="somal", household_id="hh_demo", action="x", decision="info")
 
 
 def test_concurrent_identical_consent_grants_one_succeeds_and_the_rest_are_refused_cleanly():
@@ -136,7 +136,7 @@ def test_concurrent_identical_consent_grants_one_succeeds_and_the_rest_are_refus
     def go(i):
         barrier.wait()
         try:
-            consent.grant(ALEX, grant, correlation_id=f"c{i}", at=datetime(2026, 11, 3, tzinfo=UTC))
+            consent.grant(SOMAL, grant, correlation_id=f"c{i}", at=datetime(2026, 11, 3, tzinfo=UTC))
             outcomes.append("ok")
         except AuthorizationError:
             outcomes.append("refused")
@@ -155,16 +155,16 @@ def test_a_parallel_batch_on_the_vertical_slice_connection_does_not_raise_progra
     env = _Env.open(tmp_path)
     try:
         def specialist(a):  # touches the shared connection from a worker thread
-            env.store.audit.append(correlation_id=a.correlation_id, actor_id="alex", household_id="hh_demo",
+            env.store.audit.append(correlation_id=a.correlation_id, actor_id="somal", household_id="hh_demo",
                                    action="probe", decision="info")
-            env.store.historical_row_hashes("acct_alex_checking")
+            env.store.historical_row_hashes("acct_somal_checking")
             return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
                                status="completed")
 
         plan = [DispatchItem(agent="ledger_analyst", task="a"),
                 DispatchItem(agent="policy_compliance", task="b", depends_on_ledger=False)]
         decision = RoutingDecision(intent="historical_comparison_and_tax_context", dispatch_plan=plan)
-        sup = Supervisor(ALEX, lambda _r: (decision, "test"),
+        sup = Supervisor(SOMAL, lambda _r: (decision, "test"),
                          {"ledger_analyst": specialist, "policy_compliance": specialist}, env.store.audit,
                          clock=lambda: DEMO_AS_OF)
         out = sup.run("x", correlation_id="j_slice")

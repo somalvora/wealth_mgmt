@@ -19,7 +19,7 @@ from household_agent.plan_inputs import (
     ledger_inputs_for,
     plan_from_ledger,
 )
-from household_agent.synthetic import ALEX, DEMO_AS_OF, HOUSEHOLD, JORDAN, SAM, Row, demo_planning_inputs, render_statement
+from household_agent.synthetic import SOMAL, DEMO_AS_OF, HOUSEHOLD, SAYALI, VIAAN, Row, demo_planning_inputs, render_statement
 
 COUNTY_BILL = Liability("county_bill_2026", 320000, "next Unit B property-tax installment")
 
@@ -30,7 +30,7 @@ def _kwargs(**kw):
             "real_return": d.real_return, "liabilities": [COUNTY_BILL], **kw}
 
 
-def _derive(store, actor=ALEX, **kw):
+def _derive(store, actor=SOMAL, **kw):
     return derive_planning_inputs(store, CalculationRunner(store), actor, as_of=DEMO_AS_OF, correlation_id="plan",
                                   **_kwargs(**kw))
 
@@ -42,20 +42,20 @@ def _runs(store, fn):
 
 
 def _ingest(store, categorizer, text, name):
-    return ingest_statement(store, categorizer, ALEX, text.encode(), name, purpose="statement_ingestion",
+    return ingest_statement(store, categorizer, SOMAL, text.encode(), name, purpose="statement_ingestion",
                             correlation_id="seed2", at=DEMO_AS_OF)
 
 
 # --- happy path ------------------------------------------------------------------------
 
-def test_alex_inputs_come_from_verified_statements(seeded_store):
+def test_somal_inputs_come_from_verified_statements(seeded_store):
     d = _derive(seeded_store)
-    # closing balances: rental 16,571.60 + Alex checking 13,408.03 (October; the corrupt September is ignored)
+    # closing balances: rental 16,571.60 + Somal checking 13,408.03 (October; the corrupt September is ignored)
     assert d.inputs.liquid_cash_minor == 1657160 + 1340803
-    # essentials: rental HOA 450.00 + water 118.40; Alex mortgage 3,450.00 + PG&E 212.37 + groceries 329.60
+    # essentials: rental HOA 450.00 + water 118.40; Somal mortgage 3,450.00 + PG&E 212.37 + groceries 329.60
     assert d.inputs.monthly_essential_outflow_minor == 56840 + 399197
     assert d.inputs.near_term_liabilities_minor == 320000
-    assert {a["account_id"] for a in d.accounts} == {"acct_rental_checking", "acct_alex_checking"}
+    assert {a["account_id"] for a in d.accounts} == {"acct_rental_checking", "acct_somal_checking"}
     assert all(a["months"] == ["2026-10"] for a in d.accounts)
     assert d.window == (DEMO_AS_OF.date().replace(month=8, day=1), DEMO_AS_OF.date())
 
@@ -70,9 +70,9 @@ def test_evidence_ids_cover_documents_runs_and_liabilities(seeded_store):
 
 def test_plan_run_is_recorded_and_reproducible(seeded_store):
     runner = CalculationRunner(seeded_store)
-    r1, d1, id1 = plan_from_ledger(seeded_store, runner, ALEX, as_of=DEMO_AS_OF, correlation_id="p1",
+    r1, d1, id1 = plan_from_ledger(seeded_store, runner, SOMAL, as_of=DEMO_AS_OF, correlation_id="p1",
                                    **_kwargs(reserve_months=3))
-    r2, _, id2 = plan_from_ledger(seeded_store, runner, ALEX, as_of=DEMO_AS_OF, correlation_id="p2",
+    r2, _, id2 = plan_from_ledger(seeded_store, runner, SOMAL, as_of=DEMO_AS_OF, correlation_id="p2",
                                   **_kwargs(reserve_months=3))
     assert r1.status == "awaiting_approval" and id1 != id2
     runs = {r["run_id"]: r for r in _runs(seeded_store, "plan_allocation")}
@@ -84,11 +84,11 @@ def test_plan_run_is_recorded_and_reproducible(seeded_store):
 
 
 def test_card_balance_owed_becomes_a_liability(store, categorizer):
-    card = render_statement("acct_jordan_card", "2026-10-01", "2026-10-31", "-500.00",
+    card = render_statement("acct_sayali_card", "2026-10-01", "2026-10-31", "-500.00",
                             [Row("2026-10-07", "SAFEWAY #0457", "-120.00")])
-    ingest_statement(store, categorizer, JORDAN, card.encode(), "card.csv", purpose="statement_ingestion",
+    ingest_statement(store, categorizer, SAYALI, card.encode(), "card.csv", purpose="statement_ingestion",
                      correlation_id="s", at=DEMO_AS_OF)
-    d = derive_planning_inputs(store, CalculationRunner(store), JORDAN, as_of=DEMO_AS_OF, correlation_id="p",
+    d = derive_planning_inputs(store, CalculationRunner(store), SAYALI, as_of=DEMO_AS_OF, correlation_id="p",
                                **_kwargs(liabilities=[]))
     assert d.inputs.near_term_liabilities_minor == 62000 and d.inputs.liquid_cash_minor == 0
     assert d.inputs.monthly_essential_outflow_minor == 12000
@@ -107,15 +107,15 @@ def test_multi_month_average_rounds_up(store, categorizer):
 
 # --- negative paths --------------------------------------------------------------------
 
-def test_jordan_never_sees_alex_private_balance(seeded_store):
-    d = _derive(seeded_store, actor=JORDAN)
-    assert "acct_alex_checking" in d.excluded_accounts and not d.complete
+def test_sayali_never_sees_somal_private_balance(seeded_store):
+    d = _derive(seeded_store, actor=SAYALI)
+    assert "acct_somal_checking" in d.excluded_accounts and not d.complete
     assert d.inputs.liquid_cash_minor == 1657160
-    assert all(a["account_id"] != "acct_alex_checking" for a in d.accounts)
+    assert all(a["account_id"] != "acct_somal_checking" for a in d.accounts)
 
 
 def test_dependent_gets_empty_inputs_and_not_eligible(seeded_store):
-    result, d, run_id = plan_from_ledger(seeded_store, CalculationRunner(seeded_store), SAM, as_of=DEMO_AS_OF,
+    result, d, run_id = plan_from_ledger(seeded_store, CalculationRunner(seeded_store), VIAAN, as_of=DEMO_AS_OF,
                                          correlation_id="p", **_kwargs())
     assert d.accounts == () and d.inputs.liquid_cash_minor == 0 and result.status == "not_eligible"
     assert _runs(seeded_store, "plan_allocation")[0]["provisional"] == 1
@@ -123,10 +123,10 @@ def test_dependent_gets_empty_inputs_and_not_eligible(seeded_store):
 
 def test_corrupt_statement_never_supplies_a_balance(store, categorizer):
     _ingest(store, categorizer, render_statement(
-        "acct_alex_checking", "2026-10-01", "2026-10-31", "1000.00", [Row("2026-10-03", "PAYROLL ACME CORP", "10.00")],
+        "acct_somal_checking", "2026-10-01", "2026-10-31", "1000.00", [Row("2026-10-03", "PAYROLL ACME CORP", "10.00")],
         closing_override="99999.99"), "corrupt.csv")
     d = _derive(store)
-    assert d.excluded_accounts["acct_alex_checking"] == "no verified statement in the window"
+    assert d.excluded_accounts["acct_somal_checking"] == "no verified statement in the window"
     assert d.inputs.liquid_cash_minor == 0
 
 
@@ -150,7 +150,7 @@ def test_liability_requires_evidence_and_minor_units(bad):
 
 
 def test_inputs_for_rejects_another_household(seeded_store):
-    fn = ledger_inputs_for(seeded_store, CalculationRunner(seeded_store), ALEX, clock=lambda: DEMO_AS_OF, **_kwargs())
+    fn = ledger_inputs_for(seeded_store, CalculationRunner(seeded_store), SOMAL, clock=lambda: DEMO_AS_OF, **_kwargs())
     assert fn(HOUSEHOLD).liquid_cash_minor == 2997963
     with pytest.raises(PermissionError):
         fn("hh_other")
@@ -160,17 +160,17 @@ def test_inputs_for_rejects_another_household(seeded_store):
 
 def test_new_statement_after_plan_makes_approval_stale(seeded_store, categorizer):
     now = [DEMO_AS_OF]
-    inputs_for = ledger_inputs_for(seeded_store, CalculationRunner(seeded_store), ALEX, clock=lambda: now[0],
+    inputs_for = ledger_inputs_for(seeded_store, CalculationRunner(seeded_store), SOMAL, clock=lambda: now[0],
                                    **_kwargs(reserve_months=3))
     graph = build_approval_graph(inputs_for=inputs_for, members=MEMBERS, audit=seeded_store.audit,
                                  checkpointer=InMemorySaver())
-    thread_id, out = start_request(graph, HOUSEHOLD, "alex")
+    thread_id, out = start_request(graph, HOUSEHOLD, "somal")
     assert out["status"] == "awaiting_approval"
     _ingest(seeded_store, categorizer, render_statement(
         "acct_rental_checking", "2026-09-01", "2026-09-30", "15000.00",
         [Row("2026-09-05", "MAPLE ST HOA DUES", "-450.00")]), "sept_rental.csv")
     now[0] += timedelta(hours=1)
-    out = graph.invoke(Command(resume={"approver": "jordan", "approved": True}),
+    out = graph.invoke(Command(resume={"approver": "sayali", "approved": True}),
                        {"configurable": {"thread_id": thread_id}})
     assert out["status"] == "stale"
 

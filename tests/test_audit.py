@@ -8,7 +8,7 @@ from household_agent.audit import AuditIntegrityError, AuditLog
 def _log(conn, n=3):
     log = AuditLog(conn)
     for i in range(n):
-        log.append(correlation_id="c1", actor_id="alex", household_id="hh", action="read",
+        log.append(correlation_id="c1", actor_id="somal", household_id="hh", action="read",
                    decision="allow", details={"i": i})
     return log
 
@@ -35,5 +35,5 @@ def test_out_of_band_tampering_is_detected(conn):
 
 def test_events_filter_by_correlation(conn):
     log = _log(conn)
-    log.append(correlation_id="c2", actor_id="jordan", household_id="hh", action="read", decision="deny")
-    assert [e["actor_id"] for e in log.events("c2")] == ["jordan"]
+    log.append(correlation_id="c2", actor_id="sayali", household_id="hh", action="read", decision="deny")
+    assert [e["actor_id"] for e in log.events("c2")] == ["sayali"]

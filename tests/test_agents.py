@@ -45,9 +45,9 @@ from household_agent.mcp_server import MEMBERS
 from household_agent.retrieval import CANNOT_VERIFY, RetrievalService
 from household_agent.synthetic import (
     ACCOUNTS,
-    ALEX,
+    SOMAL,
     DEMO_AS_OF,
-    JORDAN,
+    SAYALI,
     demo_planning_inputs,
     demo_policy_documents,
     demo_statements,
@@ -129,16 +129,16 @@ def retrieval(tmp_path, seeded_store):
     client = chromadb.PersistentClient(str(tmp_path / "chroma"), settings=Settings(anonymized_telemetry=False))
     svc = RetrievalService(client, HashEmbeddings(), seeded_store.authorizer, seeded_store.audit)
     for d in demo_policy_documents():
-        svc.index(ALEX, d, correlation_id="idx", at=DEMO_AS_OF)
+        svc.index(SOMAL, d, correlation_id="idx", at=DEMO_AS_OF)
     return svc
 
 
-def _ledger(seeded_store, categorizer, steps, actor=ALEX):
+def _ledger(seeded_store, categorizer, steps, actor=SOMAL):
     return LedgerAnalyst(Scripted(steps=steps), seeded_store, categorizer, actor, clock=lambda: DEMO_AS_OF)
 
 
 def _supervisor(seeded_store, specialists, router=None, **kw):
-    return Supervisor(ALEX, router or Router(), specialists, seeded_store.audit, clock=lambda: DEMO_AS_OF, **kw)
+    return Supervisor(SOMAL, router or Router(), specialists, seeded_store.audit, clock=lambda: DEMO_AS_OF, **kw)
 
 
 # --- end to end: the §9 trace ------------------------------------------------------------
@@ -146,7 +146,7 @@ def _supervisor(seeded_store, specialists, router=None, **kw):
 def test_supervisor_runs_the_property_tax_trace(seeded_store, categorizer, retrieval):
     specialists = {
         "ledger_analyst": _ledger(seeded_store, categorizer, ledger_script()),
-        "policy_compliance": PolicyCompliance(Scripted(steps=policy_script()), retrieval, ALEX, clock=lambda: DEMO_AS_OF),
+        "policy_compliance": PolicyCompliance(Scripted(steps=policy_script()), retrieval, SOMAL, clock=lambda: DEMO_AS_OF),
     }
     out = _supervisor(seeded_store, specialists).run(TRACE_QUERY, correlation_id="job_trace")
     assert out["routing"]["intent"] == "historical_comparison_and_tax_context"
@@ -233,8 +233,8 @@ def test_ledger_cannot_use_tools_outside_its_allowlist(seeded_store, categorizer
 
 
 def test_ledger_cross_member_query_is_denied(seeded_store, categorizer):
-    steps = [call("query_ledger", account_ids=["acct_alex_checking"], start="2026-10-01", end="2026-10-31"), final()]
-    r = _ledger(seeded_store, categorizer, steps, actor=JORDAN)(assignment(purpose="budgeting"))
+    steps = [call("query_ledger", account_ids=["acct_somal_checking"], start="2026-10-01", end="2026-10-31"), final()]
+    r = _ledger(seeded_store, categorizer, steps, actor=SAYALI)(assignment(purpose="budgeting"))
     assert r.outputs == {} and r.evidence_ids == [] and "authorization_denied" in r.errors[0]
     assert seeded_store.audit.events("job_t")[-1]["decision"] == "deny"
 
@@ -248,14 +248,14 @@ def test_ledger_unparseable_final_answer_needs_review(seeded_store, categorizer)
 
 def test_policy_query_refinement_limit(retrieval):
     steps = [call("retrieve_verified", query=f"Unit B rent {i}") for i in range(4)] + [final()]
-    r = PolicyCompliance(Scripted(steps=steps), retrieval, ALEX, clock=lambda: DEMO_AS_OF)(
+    r = PolicyCompliance(Scripted(steps=steps), retrieval, SOMAL, clock=lambda: DEMO_AS_OF)(
         assignment("policy_compliance"))
     assert any("query refinements" in e for e in r.errors)
 
 
 def test_policy_model_is_told_its_search_limit(retrieval):
     seen = []
-    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, ALEX,
+    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, SOMAL,
                      clock=lambda: DEMO_AS_OF)(assignment("policy_compliance"))
     assert f"at most {MAX_QUERY_REFINEMENTS + 1} times" in seen[0][0].content
 
@@ -263,27 +263,27 @@ def test_policy_model_is_told_its_search_limit(retrieval):
 def test_policy_model_is_told_today_from_its_clock(retrieval):
     seen = []
     later = DEMO_AS_OF + timedelta(days=400)
-    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, ALEX,
+    PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, SOMAL,
                      clock=lambda: later)(assignment("policy_compliance"))
     assert json.loads(seen[0][1].content)["today"] == later.date().isoformat()
 
 
 def test_policy_tax_claim_without_current_tier1_becomes_question(retrieval):
-    r = PolicyCompliance(Scripted(steps=policy_script()), retrieval, ALEX, clock=lambda: DEMO_AS_OF)(
+    r = PolicyCompliance(Scripted(steps=policy_script()), retrieval, SOMAL, clock=lambda: DEMO_AS_OF)(
         assignment("policy_compliance"))
     assert [c.kind for c in r.claims] == ["fact"] and r.questions == [CANNOT_VERIFY] and r.status == "needs_review"
 
 
 def test_policy_cannot_cite_private_doc_of_another_member(retrieval):
-    steps = [call("retrieve_verified", query="Alex private bonus property tax"),
-             final({"text": "Alex has a bonus of $9,000.00.", "evidence_ids": ["alex_private_note_000"]})]
-    r = PolicyCompliance(Scripted(steps=steps), retrieval, JORDAN, clock=lambda: DEMO_AS_OF)(
+    steps = [call("retrieve_verified", query="Somal private bonus property tax"),
+             final({"text": "Somal has a bonus of $9,000.00.", "evidence_ids": ["somal_private_note_000"]})]
+    r = PolicyCompliance(Scripted(steps=steps), retrieval, SAYALI, clock=lambda: DEMO_AS_OF)(
         assignment("policy_compliance", purpose="budgeting"))
     assert r.claims == [] and any("not retrieved" in e for e in r.errors)
 
 
 def test_policy_empty_query_is_an_error_observation(retrieval):
-    r = PolicyCompliance(Scripted(steps=[call("retrieve_verified", query=" "), final()]), retrieval, ALEX,
+    r = PolicyCompliance(Scripted(steps=[call("retrieve_verified", query=" "), final()]), retrieval, SOMAL,
                          clock=lambda: DEMO_AS_OF)(assignment("policy_compliance"))
     assert "invalid_request" in r.errors[0]
 
@@ -340,7 +340,7 @@ def test_purpose_comes_from_intent_not_from_the_model(seeded_store):
     stub = _stub()
     _supervisor(seeded_store, {"ledger_analyst": stub, "policy_compliance": stub}).run(TRACE_QUERY)
     assert {a.purpose for a in stub.calls} == {"historical_comparison"}
-    assert all(a.authorized_scope["requester"] == "alex" for a in stub.calls)
+    assert all(a.authorized_scope["requester"] == "somal" for a in stub.calls)
 
 
 def test_dispatch_budget(seeded_store):
@@ -358,7 +358,7 @@ def test_job_time_limit(seeded_store):
         return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent=a.assigned_agent,
                            status="completed")
 
-    sup = Supervisor(ALEX, Router(), {"ledger_analyst": slow, "policy_compliance": slow}, seeded_store.audit,
+    sup = Supervisor(SOMAL, Router(), {"ledger_analyst": slow, "policy_compliance": slow}, seeded_store.audit,
                      clock=lambda: now[0])
     out = sup.run(TRACE_QUERY)
     assert out["results"][1]["errors"] == ["job time limit"]
@@ -435,7 +435,7 @@ def _variance_job(audit, pct, category, **kw):
     outputs = {"pct_variance": pct, "calc_run_id": "calc_1", **({"category": category} if category else {})}
     decision = RoutingDecision(intent="historical_comparison",
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
-    return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": _stub(outputs=outputs)}, audit,
+    return Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": _stub(outputs=outputs)}, audit,
                       clock=lambda: DEMO_AS_OF, **kw)
 
 
@@ -466,7 +466,7 @@ def test_a_variance_is_flagged_exactly_when_above_its_category_threshold(pct, ca
 
 # --- review interrupt (design §5.3), only with a checkpointer ----------------------------
 
-PRIVATE = "acct_alex_checking"
+PRIVATE = "acct_somal_checking"
 
 
 def _review_job(seeded_store, status="completed", accounts=(RENTAL,), pct="16.36"):
@@ -474,7 +474,7 @@ def _review_job(seeded_store, status="completed", accounts=(RENTAL,), pct="16.36
     stub = _stub(status, outputs=outputs)
     decision = RoutingDecision(intent="historical_comparison",
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
-    sup = Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": stub}, seeded_store.audit,
+    sup = Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": stub}, seeded_store.audit,
                      clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=seeded_store.authorizer)
     return sup, stub
 
@@ -499,11 +499,11 @@ def test_finding_pauses_for_review_and_an_authorized_member_resolves_it(seeded_s
     assert out["status"] == "awaiting_review" and "briefing" not in out
     assert intr.value["kind"] == "supervisor_review" and intr.value["correlation_id"] == "j_rev"
     assert intr.value["findings"][0]["threshold_pct"] == "10" and intr.value["results"] == []
-    done = sup.resume("j_rev", {"reviewer": "jordan", "accepted": True, "note": "new assessment"}, checkpointer=saver)
+    done = sup.resume("j_rev", {"reviewer": "sayali", "accepted": True, "note": "new assessment"}, checkpointer=saver)
     assert done["status"] == "reviewed" and done["briefing"]["review"] == {
-        "reviewer": "jordan", "accepted": True, "note": "new assessment"}
+        "reviewer": "sayali", "accepted": True, "note": "new assessment"}
     assert len(stub.calls) == 1  # resuming does not re-dispatch the specialist
-    assert _reviews(seeded_store.audit, "j_rev") == [("jordan", "allow")]
+    assert _reviews(seeded_store.audit, "j_rev") == [("sayali", "allow")]
     assert seeded_store.audit.verify() > 0
 
 
@@ -512,7 +512,7 @@ def test_incomplete_result_pauses_even_without_findings(seeded_store):
     saver = InMemorySaver()
     out = sup.run("x", correlation_id="j_inc", checkpointer=saver)
     assert out["findings"] == [] and out["__interrupt__"][0].value["results"][0]["status"] == "needs_review"
-    done = sup.resume("j_inc", {"reviewer": "alex", "accepted": False}, checkpointer=saver)
+    done = sup.resume("j_inc", {"reviewer": "somal", "accepted": False}, checkpointer=saver)
     assert done["status"] == "review_rejected" and done["review"]["accepted"] is False
 
 
@@ -522,7 +522,7 @@ def test_clean_job_with_a_checkpointer_does_not_pause(seeded_store):
     assert out["status"] == "completed" and "__interrupt__" not in out
 
 
-@pytest.mark.parametrize("reviewer", ["sam", "casey_cpa", "mallory", ""])
+@pytest.mark.parametrize("reviewer", ["viaan", "casey_cpa", "mallory", ""])
 def test_unauthorized_reviewer_is_refused_audited_and_the_job_keeps_waiting(seeded_store, reviewer):
     sup, _ = _review_job(seeded_store)
     saver = InMemorySaver()
@@ -530,18 +530,18 @@ def test_unauthorized_reviewer_is_refused_audited_and_the_job_keeps_waiting(seed
     out = sup.resume("j_deny", {"reviewer": reviewer, "accepted": True}, checkpointer=saver)
     assert out["status"] == "awaiting_review" and out["review_denied_attempts"] == 1 and out["__interrupt__"]
     assert _reviews(seeded_store.audit, "j_deny") == [(reviewer or "unknown", "deny")]
-    assert sup.resume("j_deny", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+    assert sup.resume("j_deny", {"reviewer": "somal", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
 
 
 def test_reviewer_needs_access_to_every_account_the_job_used(seeded_store):
     sup, _ = _review_job(seeded_store, accounts=(RENTAL, PRIVATE))
     saver = InMemorySaver()
     sup.run("x", correlation_id="j_acct", checkpointer=saver)
-    out = sup.resume("j_acct", {"reviewer": "jordan", "accepted": True}, checkpointer=saver)
+    out = sup.resume("j_acct", {"reviewer": "sayali", "accepted": True}, checkpointer=saver)
     assert out["status"] == "awaiting_review"
     deny = next(e for e in seeded_store.audit.events("j_acct") if e["action"] == "review")
-    assert deny["actor_id"] == "jordan" and deny["reason"].startswith(PRIVATE)
-    assert sup.resume("j_acct", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+    assert deny["actor_id"] == "sayali" and deny["reason"].startswith(PRIVATE)
+    assert sup.resume("j_acct", {"reviewer": "somal", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
 
 
 def test_paused_review_survives_restart(tmp_path):
@@ -557,7 +557,7 @@ def test_paused_review_survives_restart(tmp_path):
     ckpt1.close()
     ledger2, ckpt2, store2 = open_all()  # "new process"
     sup2, stub2 = _review_job(store2)
-    out = sup2.resume("j_restart", {"reviewer": "jordan", "accepted": True}, checkpointer=SqliteSaver(ckpt2))
+    out = sup2.resume("j_restart", {"reviewer": "sayali", "accepted": True}, checkpointer=SqliteSaver(ckpt2))
     assert out["status"] == "reviewed" and stub2.calls == []
     actions = [e["action"] for e in store2.audit.events("j_restart")]
     assert actions == ["route", "dispatch", "threshold_check", "review", "compose_briefing"]
@@ -583,9 +583,9 @@ def test_ledger_can_ingest_a_statement_through_its_tool(store, categorizer):
 
 
 def test_ledger_ingest_of_another_members_statement_is_denied(store, categorizer):
-    csv_text = demo_statements()["2026_10_alex_checking.csv"]
-    steps = [call("ingest_statement", csv_text=csv_text, source_name="alex.csv"), final()]
-    r = _ledger(store, categorizer, steps, actor=JORDAN)(
+    csv_text = demo_statements()["2026_10_somal_checking.csv"]
+    steps = [call("ingest_statement", csv_text=csv_text, source_name="somal.csv"), final()]
+    r = _ledger(store, categorizer, steps, actor=SAYALI)(
         assignment(purpose="statement_ingestion", inputs={"csv_text": csv_text}))
     assert "ingest_statement: authorization_denied" in r.errors[0]
     assert store.audit.events("job_t")[-1]["decision"] == "deny"
@@ -759,7 +759,7 @@ def test_budget_is_shared_by_a_concurrent_batch_in_plan_order(seeded_store):
 def test_time_limit_denies_a_whole_batch_before_it_starts(seeded_store):
     stub = _stub()
     clock = [DEMO_AS_OF + timedelta(seconds=400)]
-    sup = Supervisor(ALEX, _plan_router(_ledger_item(), _ledger_item()), {"ledger_analyst": stub}, seeded_store.audit,
+    sup = Supervisor(SOMAL, _plan_router(_ledger_item(), _ledger_item()), {"ledger_analyst": stub}, seeded_store.audit,
                      clock=lambda: clock[0])
     state = sup.build().invoke({"correlation_id": "j_t", "request": "x", "started_at": DEMO_AS_OF.isoformat()})
     assert stub.calls == [] and [r["errors"] for r in state["results"]] == [["job time limit"]] * 2
@@ -771,7 +771,7 @@ def test_audit_appends_from_two_threads_keep_the_chain_valid():
 
     def write(n):
         for i in range(25):
-            audit.append(correlation_id=f"c{n}", actor_id="alex", household_id="hh", action="x", decision="info",
+            audit.append(correlation_id=f"c{n}", actor_id="somal", household_id="hh", action="x", decision="info",
                          details={"i": i})
 
     threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
@@ -793,7 +793,7 @@ def test_results_and_audit_follow_plan_order_for_any_completion_order(delays):
 
     plan = [DispatchItem(agent="ledger_analyst" if i % 2 == 0 else "policy_compliance", task=str(i),
                          depends_on_ledger=False) for i in range(4)]
-    sup = Supervisor(ALEX, _plan_router(*plan), {"ledger_analyst": specialist, "policy_compliance": specialist}, audit,
+    sup = Supervisor(SOMAL, _plan_router(*plan), {"ledger_analyst": specialist, "policy_compliance": specialist}, audit,
                      clock=lambda: DEMO_AS_OF)
     out = sup.run("x", correlation_id="j_p")
     assert [r["errors"] for r in out["results"]] == [["0"], ["1"], ["2"], ["3"]]
@@ -828,7 +828,7 @@ from household_agent.models import Action, Role  # noqa: E402
 from household_agent.tools import ToolSession  # noqa: E402
 
 RENTAL_CSV = demo_statements()["2026_10_rental_checking.csv"]
-ALEX_CSV = demo_statements()["2026_10_alex_checking.csv"]
+SOMAL_CSV = demo_statements()["2026_10_somal_checking.csv"]
 
 
 class Recorder(Scripted):
@@ -848,7 +848,7 @@ def _documents(store):
 @pytest.mark.parametrize("purpose", ["historical_comparison", "tax_preparation", "capital_allocation", "none"])
 def test_ingest_tool_is_not_offered_for_read_only_purposes(store, categorizer, purpose):
     model = Recorder(steps=[final()], seen=[])
-    LedgerAnalyst(model, store, categorizer, ALEX, clock=lambda: DEMO_AS_OF)(
+    LedgerAnalyst(model, store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)(
         assignment(purpose=purpose, inputs={"csv_text": RENTAL_CSV}))
     assert model.seen == [[t["function"]["name"] for t in LEDGER_READ_TOOLS]]
     assert "ingest_statement" not in model.seen[0] and "query_ledger" in model.seen[0]
@@ -856,7 +856,7 @@ def test_ingest_tool_is_not_offered_for_read_only_purposes(store, categorizer, p
 
 def test_ingest_tool_is_offered_only_for_the_ingestion_purpose(store, categorizer):
     model = Recorder(steps=[final()], seen=[])
-    LedgerAnalyst(model, store, categorizer, ALEX, clock=lambda: DEMO_AS_OF)(
+    LedgerAnalyst(model, store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)(
         assignment(purpose=INGEST_PURPOSE, inputs={"csv_text": RENTAL_CSV}))
     assert "ingest_statement" in model.seen[0]
 
@@ -870,7 +870,7 @@ def test_an_injected_ingest_call_during_a_read_only_job_does_nothing(store, cate
 
 
 def test_ingest_of_csv_that_differs_from_the_task_is_refused_and_audited(store, categorizer):
-    steps = [call("ingest_statement", csv_text=ALEX_CSV, source_name="swapped.csv"), final()]
+    steps = [call("ingest_statement", csv_text=SOMAL_CSV, source_name="swapped.csv"), final()]
     r = _ledger(store, categorizer, steps)(assignment(purpose=INGEST_PURPOSE, inputs={"csv_text": RENTAL_CSV}))
     assert "ingest_statement: statement_mismatch" in r.errors[0] and r.status == "completed"
     assert _documents(store) == 0
@@ -896,17 +896,17 @@ def test_ingest_of_the_task_supplied_csv_works(store, categorizer):
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(st.text(max_size=300))
 def test_any_csv_other_than_the_supplied_one_is_refused_before_it_is_parsed(store, categorizer, text):
-    supplied = ALEX_CSV
+    supplied = SOMAL_CSV
     if text == supplied:
         return
-    session = ToolSession(store, categorizer, ALEX, INGEST_PURPOSE, "c_prop", restrict_ingest=True,
+    session = ToolSession(store, categorizer, SOMAL, INGEST_PURPOSE, "c_prop", restrict_ingest=True,
                           ingest_csv_sha256=hashlib.sha256(supplied.encode()).hexdigest())
     out = session.call("ingest_statement", {"csv_text": text, "source_name": "x.csv"})
     assert out["ok"] is False and out["error"]["type"] == "statement_mismatch" and _documents(store) == 0
 
 
 def test_a_host_session_without_the_restriction_still_ingests(store, categorizer):
-    out = ToolSession(store, categorizer, ALEX, INGEST_PURPOSE, "c_host").call(
+    out = ToolSession(store, categorizer, SOMAL, INGEST_PURPOSE, "c_host").call(
         "ingest_statement", {"csv_text": RENTAL_CSV, "source_name": "r.csv"})
     assert out["ok"] is True
 
@@ -934,7 +934,7 @@ def _two_run_script():
 def _one_job(seeded_store, specialist, **kw):
     decision = RoutingDecision(intent="historical_comparison",
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
-    return Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": specialist}, seeded_store.audit,
+    return Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": specialist}, seeded_store.audit,
                       clock=lambda: DEMO_AS_OF, members=MEMBERS, authorizer=seeded_store.authorizer, **kw)
 
 
@@ -982,9 +982,9 @@ def test_reviewer_scope_covers_every_account_the_job_read_not_just_the_last_run(
     saver = InMemorySaver()
     out = sup.run("x", correlation_id="j_scope", checkpointer=saver)
     assert out["status"] == "awaiting_review"
-    denied = sup.resume("j_scope", {"reviewer": "jordan", "accepted": True}, checkpointer=saver)
+    denied = sup.resume("j_scope", {"reviewer": "sayali", "accepted": True}, checkpointer=saver)
     assert denied["status"] == "awaiting_review" and denied["review_denied_attempts"] == 1
-    assert sup.resume("j_scope", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+    assert sup.resume("j_scope", {"reviewer": "somal", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
 
 
 def test_a_query_only_job_still_reports_the_accounts_it_read(seeded_store, categorizer):
@@ -1007,7 +1007,7 @@ def test_every_calculation_above_its_threshold_is_flagged_whatever_its_position(
     stub = _stub(outputs={**calcs[-1], "calculations": calcs})
     decision = RoutingDecision(intent="historical_comparison",
                                dispatch_plan=[DispatchItem(agent="ledger_analyst", task="x")])
-    out = Supervisor(ALEX, lambda _r: (decision, "rules"), {"ledger_analyst": stub}, AuditLog(conn),
+    out = Supervisor(SOMAL, lambda _r: (decision, "rules"), {"ledger_analyst": stub}, AuditLog(conn),
                      clock=lambda: DEMO_AS_OF).run("x")
     expected = [f"calc_{i}" for i, (p, c) in enumerate(runs) if abs(p) > variance_threshold(c)]
     assert [f["calc_run_id"] for f in out["findings"]] == expected
@@ -1023,7 +1023,7 @@ def _paused(seeded_store, cid="j_hh"):
     sup, _ = _review_job(seeded_store)
     saver = InMemorySaver()
     out = sup.run("x", correlation_id=cid, checkpointer=saver)
-    assert out["status"] == "awaiting_review" and out["household_id"] == "hh_demo" and out["requester"] == "alex"
+    assert out["status"] == "awaiting_review" and out["household_id"] == "hh_demo" and out["requester"] == "somal"
     return sup, saver
 
 
@@ -1040,7 +1040,7 @@ def test_an_adult_in_another_household_cannot_resume_and_the_refusal_is_audited_
     [deny] = [e for e in seeded_store.audit.events("j_hh") if e["action"] == "resume"]
     assert deny["decision"] == "deny" and deny["household_id"] == "hh_demo" and deny["actor_id"] == "eve"
     assert "hh_other" in deny["reason"]
-    assert sup.resume("j_hh", {"reviewer": "alex", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
+    assert sup.resume("j_hh", {"reviewer": "somal", "accepted": True}, checkpointer=saver)["status"] == "reviewed"
 
 
 def test_another_household_does_not_even_find_the_job_by_its_id(seeded_store):
@@ -1112,7 +1112,7 @@ def test_a_fast_specialist_in_a_single_item_batch_is_unaffected_by_the_time_limi
 
 def test_tool_session_refuses_every_call_once_cancelled(store, categorizer):
     cancel = threading.Event()
-    session = ToolSession(store, categorizer, ALEX, "historical_comparison", "c_cancel", cancel=cancel)
+    session = ToolSession(store, categorizer, SOMAL, "historical_comparison", "c_cancel", cancel=cancel)
     assert session.call("list_accounts")["ok"] is True
     cancel.set()
     for name, args in [("list_accounts", {}), ("query_ledger", {"account_ids": [RENTAL], "start": "2026-10-01",
