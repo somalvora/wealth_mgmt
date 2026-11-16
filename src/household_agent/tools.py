@@ -13,6 +13,7 @@ calculation.
 
 import contextvars
 import hashlib
+import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -69,6 +70,21 @@ def _error(exc: BaseException) -> dict[str, Any]:
     if kind == "authorization_denied" and message.startswith("unknown account"):
         message += "; call list_accounts for the account ids you may read"  # a model guessed an id it never saw
     return {"ok": False, "error": {"type": kind, "message": message}}
+
+
+def _params_object(params: Any) -> dict[str, Any]:
+    """``params`` as a dict. Some models send the object as a JSON string; that is read, anything else is refused
+    with a message that says what is wanted (a bare ``TypeError`` text gives the model nothing to correct)."""
+    if params is None:
+        return {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except ValueError:
+            params = None
+    if not isinstance(params, dict):
+        raise ValueError("params must be a JSON object such as {\"start\": \"2026-10-01\", \"end\": \"2026-10-31\"}")
+    return params
 
 
 def _txn_view(t: Transaction) -> dict[str, Any]:
@@ -189,13 +205,14 @@ class ToolSession:
         def run() -> dict[str, Any]:
             if fn not in REGISTRY:
                 raise KeyError(f"unknown calculation {fn!r}; allowed: {sorted(REGISTRY)}")
+            calc_params = _params_object(params)
             unknown = [i for i in transaction_ids if i not in self._seen]
             if unknown:
                 raise IneligibleInputError(f"transactions not returned by query_ledger in this session: {unknown}")
             r = CalculationRunner(self.store).run(
                 fn, [self._seen[i] for i in transaction_ids], actor_id=self.actor.member_id,
                 household_id=self.actor.household_id, correlation_id=self.correlation_id,
-                params=params or {}, allow_provisional=allow_provisional, acting_agent=self.acting_agent,
+                params=calc_params, allow_provisional=allow_provisional, acting_agent=self.acting_agent,
             )
             return {"run_id": r.run_id, "fn": r.fn, "output": r.output, "input_hash": r.input_hash,
                     "output_hash": r.output_hash, "library_version": r.library_version,

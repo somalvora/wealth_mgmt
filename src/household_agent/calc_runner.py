@@ -53,6 +53,22 @@ REGISTRY: dict[str, Callable[[Sequence[Transaction], dict], Any]] = {
     "cluster_risk": _cluster,
 }
 
+# ``params`` keys each calculation reads (ISO dates). A model only sees these through the tool description and the
+# error below, so both are built from this table.
+REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
+    "cash_flow": ("start", "end"),
+    "category_totals": ("start", "end"),
+    "variance_between_transactions": (),
+    "recurring_drift": ("current_period_start",),
+    "cluster_risk": ("start", "end"),
+}
+
+
+def params_help() -> str:
+    """One line per calculation naming the ``params`` it needs, for the tool description."""
+    return "; ".join(f"{fn} params {{{', '.join(keys)}}}" if keys else f"{fn} needs no params"
+                     for fn, keys in REQUIRED_PARAMS.items())
+
 
 @dataclass(frozen=True)
 class CalculationRun:
@@ -102,6 +118,10 @@ class CalculationRunner:
         params = params or {}
         if fn not in REGISTRY:
             raise KeyError(f"unknown calculation {fn!r}; allowed: {sorted(REGISTRY)}")
+        missing = [k for k in REQUIRED_PARAMS[fn] if k not in params]
+        if missing:
+            raise ValueError(f"{fn} requires params {', '.join(REQUIRED_PARAMS[fn])} (ISO dates, YYYY-MM-DD); "
+                             f"missing: {', '.join(missing)}")
 
         provisional = False
         for t in transactions:
