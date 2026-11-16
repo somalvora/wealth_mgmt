@@ -45,8 +45,18 @@ def _cluster(txns: Sequence[Transaction], params: dict) -> Any:
             for a in hf.cluster_risk(current, [t for t in txns if t.posted_at < split])]
 
 
+def _cash_flow(txns: Sequence[Transaction], params: dict) -> Any:
+    """Money in and out. ``exclude_categories`` leaves out money that only moved (a card payment, a transfer between
+    the household's own accounts), which is neither income nor spending."""
+    skip = params.get("exclude_categories") or []
+    if not isinstance(skip, list):
+        raise ValueError("exclude_categories must be a list of category names, for example [\"transfer\"]")
+    return hf.cash_flow([t for t in txns if t.category not in skip],
+                        date.fromisoformat(params["start"]), date.fromisoformat(params["end"]))
+
+
 REGISTRY: dict[str, Callable[[Sequence[Transaction], dict], Any]] = {
-    "cash_flow": lambda t, p: hf.cash_flow(t, date.fromisoformat(p["start"]), date.fromisoformat(p["end"])),
+    "cash_flow": _cash_flow,
     "category_totals": lambda t, p: hf.category_totals(t, date.fromisoformat(p["start"]), date.fromisoformat(p["end"])),
     "variance_between_transactions": _variance_between,
     "recurring_drift": _drift,
@@ -66,8 +76,9 @@ REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
 
 def params_help() -> str:
     """One line per calculation naming the ``params`` it needs, for the tool description."""
-    return "; ".join(f"{fn} params {{{', '.join(keys)}}}" if keys else f"{fn} needs no params"
-                     for fn, keys in REQUIRED_PARAMS.items())
+    lines = "; ".join(f"{fn} params {{{', '.join(keys)}}}" if keys else f"{fn} needs no params"
+                      for fn, keys in REQUIRED_PARAMS.items())
+    return lines + "; cash_flow also takes optional exclude_categories, a list such as [\"transfer\"]"
 
 
 @dataclass(frozen=True)

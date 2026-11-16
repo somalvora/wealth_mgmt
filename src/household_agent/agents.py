@@ -205,7 +205,9 @@ LEDGER_PROMPT = (
     "task) rather than widening the date range and repeating it, then pass the transaction IDs you found "
     "to run_calculation. account_ids must come from readable_accounts in the task inputs (or list_accounts if absent); never invent one. A claim with a computed "
     "number (a difference, percentage or total) must cite the run_id from run_calculation, not just the "
-    "transactions. " + _JSON_RULE
+    "transactions. For money in and money out (inflow, outflow, net) run cash_flow with exclude_categories "
+    "[\"transfer\"]: a card payment or a move between the household's own accounts is neither income nor spending. "
+    + _JSON_RULE
 )
 POLICY_PROMPT = (
     "You are the Policy & Compliance agent. Use retrieve_verified to find sources and cite chunk IDs. "
@@ -714,6 +716,26 @@ def flagged_evidence_ids(results: list[Mapping[str, Any]], flagged_docs: set[str
     return ids
 
 
+_MODEL_BUSY = re.compile(r"\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|RateLimit|high demand", re.IGNORECASE)
+
+
+def failure_notes(results: list[AgentResult]) -> list[str]:
+    """One line per failed specialist, so a crash or a busy model is not a blank answer. Only the exception type is
+    shown (never its message: an API error can echo a key or a request)."""
+    notes = []
+    for r in results:
+        if r.status != "failed":
+            continue
+        who = r.agent.replace("_", " ")
+        if any(_MODEL_BUSY.search(e) for e in r.errors):
+            notes.append(f"The model service is busy or over its quota, so the {who} could not answer and nothing was "
+                         "verified. Wait a minute and ask again, or run with another model.")
+        else:
+            kind = r.errors[0].split(":", 1)[0] if r.errors else "unknown error"
+            notes.append(f"The {who} could not finish ({kind}), so nothing from it was verified. The trace has the details.")
+    return notes
+
+
 def compose_briefing(state: JobState) -> dict[str, Any]:
     """Deterministic: lists only validated claims, open questions and review flags."""
     results = [AgentResult.model_validate(r) for r in state.get("results", [])]
@@ -740,7 +762,7 @@ def compose_briefing(state: JobState) -> dict[str, Any]:
                       + list(alloc.get("statements", [])),
         "alerts": alerts,
         "allocation": alloc or None,
-        "questions": [q for r in results for q in r.questions] + no_figures
+        "questions": [q for r in results for q in r.questions] + no_figures + failure_notes(results)
                      + ([f"Reminder not drafted: {error}"] if error else [])
                      + list(alloc.get("questions", [])) + list(alloc.get("flags", [])),
         "actions_for_approval": actions,

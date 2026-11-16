@@ -137,6 +137,12 @@ def test_calculation_with_its_params_still_runs(seeded_store, categorizer):
     assert out["ok"] and out["fn"] == "category_totals"
 
 
+def test_the_model_is_told_how_to_leave_transfers_out_of_money_in_and_out():
+    from household_agent.agents import LEDGER_PROMPT
+    desc = next(t["function"]["description"] for t in LEDGER_TOOLS if t["function"]["name"] == "run_calculation")
+    assert "exclude_categories" in desc and "exclude_categories" in LEDGER_PROMPT and "transfer" in LEDGER_PROMPT
+
+
 def test_params_sent_as_a_json_string_are_read(seeded_store, categorizer):
     s = _session(seeded_store, categorizer)
     ids = _rental_ids(s)
