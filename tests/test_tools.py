@@ -1,7 +1,11 @@
 from dataclasses import replace
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
+from household_agent.agents import LEDGER_TOOLS
+from household_agent.calc_runner import REGISTRY, REQUIRED_PARAMS
 from household_agent.consent import ConsentStore
 from household_agent.synthetic import SOMAL, CASEY_CPA, DEMO_AS_OF, SAYALI, VIAAN, cpa_grant, demo_statements
 from household_agent.tools import ToolSession
@@ -103,6 +107,78 @@ def test_tool_budget_is_enforced(seeded_store, categorizer):
 )
 def test_bad_requests_return_structured_errors(seeded_store, categorizer, name, args, kind):
     assert _session(seeded_store, categorizer).call(name, args)["error"]["type"] == kind
+
+
+def _rental_ids(s):
+    rows = s.call("query_ledger", {"account_ids": [RENTAL], "start": "2025-10-01", "end": "2026-10-31"})
+    return [t["transaction_id"] for t in rows["transactions"]]
+
+
+@pytest.mark.parametrize("fn", [f for f, keys in REQUIRED_PARAMS.items() if keys])
+def test_missing_calculation_params_are_named_in_the_error(seeded_store, categorizer, fn):
+    s = _session(seeded_store, categorizer)
+    out = s.call("run_calculation", {"fn": fn, "transaction_ids": _rental_ids(s)})
+    message = out["error"]["message"]
+    assert out["error"]["type"] == "invalid_request"
+    assert fn in message and all(k in message for k in REQUIRED_PARAMS[fn]) and "ISO dates" in message
+
+
+def test_partly_supplied_params_report_only_what_is_missing(seeded_store, categorizer):
+    s = _session(seeded_store, categorizer)
+    out = s.call("run_calculation", {"fn": "category_totals", "transaction_ids": _rental_ids(s),
+                                     "params": {"start": "2026-10-01"}})
+    assert out["error"]["type"] == "invalid_request" and out["error"]["message"].endswith("missing: end")
+
+
+def test_calculation_with_its_params_still_runs(seeded_store, categorizer):
+    s = _session(seeded_store, categorizer)
+    out = s.call("run_calculation", {"fn": "category_totals", "transaction_ids": _rental_ids(s),
+                                     "params": {"start": "2025-10-01", "end": "2026-10-31"}})
+    assert out["ok"] and out["fn"] == "category_totals"
+
+
+def test_params_sent_as_a_json_string_are_read(seeded_store, categorizer):
+    s = _session(seeded_store, categorizer)
+    ids = _rental_ids(s)
+    as_dict = s.call("run_calculation", {"fn": "category_totals", "transaction_ids": ids,
+                                         "params": {"start": "2025-10-01", "end": "2026-10-31"}})
+    as_text = s.call("run_calculation", {"fn": "category_totals", "transaction_ids": ids,
+                                         "params": '{"start": "2025-10-01", "end": "2026-10-31"}'})
+    assert as_text["ok"] and as_text["output"] == as_dict["output"]
+
+
+@pytest.mark.parametrize("params", ["not json", "[1, 2]", '"just a string"', 5, ["start", "end"]])
+def test_params_that_are_not_an_object_get_a_clear_error(seeded_store, categorizer, params):
+    s = _session(seeded_store, categorizer)
+    out = s.call("run_calculation", {"fn": "category_totals", "transaction_ids": _rental_ids(s), "params": params})
+    assert out["error"]["type"] == "invalid_request" and "JSON object" in out["error"]["message"]
+
+
+@given(params=st.one_of(st.text(max_size=20), st.integers(), st.lists(st.integers(), max_size=3)))
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_property_non_object_params_never_raise(params, seeded_store, categorizer):
+    s = _session(seeded_store, categorizer)
+    out = s.call("run_calculation", {"fn": "cash_flow", "transaction_ids": _rental_ids(s), "params": params})
+    assert not out["ok"] and out["error"]["type"] == "invalid_request"
+
+
+def test_tool_description_lists_every_calculations_params():
+    assert set(REQUIRED_PARAMS) == set(REGISTRY)  # a new calculation must declare its params
+    desc = next(t["function"]["description"] for t in LEDGER_TOOLS if t["function"]["name"] == "run_calculation")
+    assert all(fn in desc and all(k in desc for k in keys) for fn, keys in REQUIRED_PARAMS.items())
+
+
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(extra=st.dictionaries(st.text(min_size=1, max_size=8), st.text(max_size=8), max_size=3))
+def test_property_params_without_required_keys_are_always_refused(extra, seeded_store, categorizer):
+    s = _session(seeded_store, categorizer)
+    ids = _rental_ids(s)
+    for fn, keys in REQUIRED_PARAMS.items():
+        if not keys:
+            continue
+        params = {k: v for k, v in extra.items() if k not in keys}
+        out = s.call("run_calculation", {"fn": fn, "transaction_ids": ids, "params": params})
+        assert not out["ok"] and out["error"]["type"] == "invalid_request"
 
 
 def test_ingest_tool_guards(store, categorizer):
