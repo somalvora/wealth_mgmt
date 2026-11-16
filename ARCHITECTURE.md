@@ -423,7 +423,7 @@ Every decision, allow or deny, is written to the audit log along with `policy_ve
 | Untraceable actions | Hash-chained audit log, `verify()` | `audit.py` |
 | LLM invents allocation amounts | Thoughts are strategies; cents computed by `expand_step`; model thoughts with amount fields or currency in the rationale are rejected | `allocation.py`, `llm_planner.py` |
 | Hosted model never answers a request | Each Groq/Gemini request times out after 90 s (`HOSTED_TIMEOUT_S`), is retried up to 6 times, then fails as the row below | `llm.py` |
-| Model call fails (dropped connection, API error) | Treated like an unusable reply: template thoughts / critic no opinion / router keyword rules (`rules_fallback`), recorded with the error type only; the run continues |
+| Model call fails (dropped connection, API error) | Treated like an unusable reply: template thoughts / critic no opinion / router keyword rules (`rules_fallback`; the rules know everyday spending words such as "summary", "spending" and "how much", so a rate-limited router does not turn a spending question into out-of-scope), recorded with the error type only; the run continues |
 | Model persona output is malformed | Per-persona template fallback, recorded; rule-breaking thoughts hard-pruned, not repaired | `llm_planner.py`, `planning.py` |
 | Plan breaks caps or reserve | Hard prune before scoring; leaves must allocate exactly the surplus | `allocation.py`, `planning.py` |
 | Critic prunes a good branch | Critic is advisory; disagreement > 0.20 retains the branch for review | `planning.py` |

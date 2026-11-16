@@ -593,7 +593,7 @@ _REMINDER = re.compile(r"\b(remind me|set (?:up )?(?:a |an )?reminder|calendar r
 _PLANNING = re.compile(r"\b(allocate|surplus|where should .*(?:money|\$\s?\d)|extra (?:money|cash|\$)|invest|capital allocation)\b",
                        re.I)
 _PAY_DOWN = re.compile(r"\bpay(?:ing)?\s+(?:down|off)\b", re.I)  # "pay down the mortgage" is a choice, not a payment
-_LEDGER = re.compile(r"\b(unusual|compare|compared|last year|higher|lower|variance|spent|spend|paid)\b", re.I)
+_LEDGER = re.compile(r"\b(unusual|compare|compared|last year|higher|lower|variance|spent|spend|spending|paid|summary|summari[sz]e|breakdown|break ?down|how much|expenses?|categor(?:y|ies)|purchases|transactions|charges)\b", re.I)
 _POLICY = re.compile(r"\b(tax|deduct\w*|accounted for|lease|rule|policy|compliance)\b", re.I)
 
 
