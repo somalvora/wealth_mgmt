@@ -74,7 +74,7 @@ Only the questions above were tried on live Gemma. Other questions (for example 
 
 Confirm each number against the README and the design document before recording. These came from runs during development, all on synthetic data.
 
-- Test suite: 722 tests passing (README, Testing).
+- Test suite: 736 tests passing (README, Testing).
 - Router with Gemma 4 26B (hosted): routing accuracy 0.9818, schema validity 1.0, 0 of 69 fallbacks.
 - Allocation scenarios with Qwen2.5 7B (CPU, Ollama), 5 scenarios: all gates pass. The planner fell back to template personas 9 times (malformed JSON, missing persona, invalid value, too many list items) and the invariants still held. The critic made 41 calls with no failures.
 - Live vertical slice: 14 of 14 checks on Gemma 4 26B and on Qwen2.5-3B-Instruct.
