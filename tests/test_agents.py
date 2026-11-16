@@ -43,6 +43,7 @@ from household_agent.authz import Authorizer
 from household_agent.llm import HashEmbeddings
 from household_agent.mcp_server import MEMBERS
 from household_agent.retrieval import CANNOT_VERIFY, RetrievalService
+from household_finance.money import format_minor
 from household_agent.synthetic import (
     ACCOUNTS,
     SOMAL,
@@ -1132,3 +1133,25 @@ def test_result_with_another_task_id_or_agent_is_discarded(seeded_store, field, 
     [r] = out["results"]
     assert r["status"] == "failed" and r["outputs"] == {} and f"{field} mismatch" in r["errors"][0]
     assert out["findings"] == []
+
+
+# --- a model that fumbles run_calculation's params still gets its figures (live Gemma, 2026-11) -----------
+
+def test_analyst_recovers_from_missing_then_stringified_params(seeded_store, categorizer):
+    """Live run: category_totals with no params (an opaque KeyError), then params as a JSON string. The error now
+    names the missing keys, a JSON-string params is read, and the dollar claim is kept."""
+    window = {"start": "2025-10-01", "end": "2026-10-31"}
+
+    def claim(m):
+        run = tool_results(m, "run_calculation")[-1]
+        category, cents = next((c, v) for c, v in run["output"].items() if isinstance(v, int))
+        return final({"text": f"{category} was {format_minor(cents)}.", "evidence_ids": [run["run_id"]]})
+
+    r = _ledger(seeded_store, categorizer, [
+        call("query_ledger", account_ids=[RENTAL], start=window["start"], end=window["end"]),
+        lambda m: call("run_calculation", fn="category_totals", transaction_ids=_txn_ids(m)),
+        lambda m: call("run_calculation", fn="category_totals", transaction_ids=_txn_ids(m), params=json.dumps(window)),
+        claim,
+    ])(assignment())
+    assert r.status == "completed" and len(r.claims) == 1
+    assert len(r.errors) == 1 and "requires params start, end" in r.errors[0]  # the one failed call, now self-explaining
