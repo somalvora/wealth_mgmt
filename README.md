@@ -119,6 +119,8 @@ What's in Phase 2 so far:
     - **No external actions.** A transfer request is refused, and no tool can move money. The audit chain verifies.
     - By default the agents use `PlaybackChatModel`, which replays scripted tool calls offline. `--model ollama:qwen2.5:7b` uses a real model for the router and both specialists. The checks test the system's guarantees, not the model's wording.
 
+Notes for the recorded video (outline, demo script, links, numbers to quote): [VIDEO.md](VIDEO.md).
+
 ## Quick start
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Ollama is **not** needed to run the tests or the demo. It's only needed for real-model runs:
