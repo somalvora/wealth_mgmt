@@ -177,7 +177,8 @@ async function send(text) {
     if (b.approval) say('bot', b.approval.status === 'awaiting_approval' ? 'I drafted an allocation plan. It needs a household adult to approve it.'
       : 'No allocation plan was drafted.' + (b.approval.note ? ' ' + b.approval.note : ''), m => renderApproval(b.approval, m));
     if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !failed.length)
-      say('bot', `Done (${b.status}), nothing to report.`);
+      say('bot', b.intent === 'out_of_scope' ? 'That is outside what I can help with. I only answer questions about this household\'s money: spending history, tax treatment and allocation plans.'
+        : `Done (${b.status}), nothing to report.`);
   }
   busy = false; $('send').disabled = false;
 }
