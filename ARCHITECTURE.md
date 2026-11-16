@@ -370,6 +370,8 @@ An `out_of_scope` question produces no statements, so the page shows an explicit
 
 Security: the page writes model and PDF text with `textContent` only (a test forbids `innerHTML`), ids are validated by regex, messages are capped at 2,000 characters, uploads are read up to the parser's size cap plus one byte, and the server binds to 127.0.0.1. There is no login: the user picks a member. This is a demo, not a deployed service.
 
+`synthetic.realistic_card_statement(seed, month, account, opening)` builds a fictional card month (about 40 rows: many small grocery and health charges, one large bill, two payments and a return) in `hh_statement_csv_v1`, and `scripts/make_card_statement.py` writes it to a file for upload as Sayali. It was shaped from the category mix and amount ranges of a real card export, but copies no real row, merchant or amount. It reconciles by construction, so it does not weaken the reconciliation check, which only means something when the closing balance comes from outside the rows. A converter for real bank exports is deliberately not built: those exports carry no balances.
+
 `sample_statements.py` generates the five deterministic PDFs with reportlab (`invariant=1`), including a tampered one and an image-only scan.
 
 ## 5. Storage schema (SQLite)
