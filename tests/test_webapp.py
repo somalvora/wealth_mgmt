@@ -187,9 +187,17 @@ def test_audit_chain_verifies_then_reports_tampering(client, service):
     assert bad["intact"] is False and bad["reason"]
 
 
-def test_no_current_statements_says_so_instead_of_a_misleading_reserve_message(client):
+def test_no_current_statements_says_so_instead_of_a_misleading_reserve_message(tmp_path):
+    svc = DemoService(tmp_path, history=False)  # only last October is on file: nothing to allocate yet
+    client = TestClient(create_app(svc))
     body = client.post("/api/chat", json={"member": "somal", "message": "We have a surplus this month; how should we allocate it?"}).json()
     assert body["approval"]["status"] == "not_eligible" and "Upload this month" in body["approval"]["note"]
+    svc.close()
+
+
+def test_with_two_years_of_history_an_allocation_is_planned_from_the_latest_statements(client):
+    body = client.post("/api/chat", json={"member": "somal", "message": "We have a surplus this month; how should we allocate it?"}).json()
+    assert body["approval"]["status"] == "awaiting_approval" and body["approval"]["note"] is None
 
 
 def test_ledger_reads_in_the_trace_name_the_agent(client):

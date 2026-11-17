@@ -38,10 +38,12 @@ from household_agent.approval import build_approval_graph
 from household_agent.audit import AuditIntegrityError, AuditLog
 from household_agent.authz import Actor, AuthorizationError, Authorizer
 from household_agent.categorize import Categorizer
-from household_agent.ingest import StatementParseError
+from household_agent.history import HISTORY_PREFIX, brokerage_summaries, history_statements, statement_source
+from household_agent.ingest import StatementParseError, parse_statement
 from household_agent.ingest.pdf_statement import MAX_PDF_BYTES
 from household_agent.ledger import DuplicateDocumentError, LedgerStore
 from household_agent.mcp_server import MEMBERS
+from household_agent.models import ReconciliationStatus
 from household_agent.pipeline import ingest_statement
 from household_agent.plan_inputs import Liability, ledger_inputs_for
 from household_agent.retrieval import RetrievalService
@@ -88,6 +90,7 @@ class DemoService:
     model_factory: Any = None  # role -> BaseChatModel; None = offline playback and keyword router
     embeddings: Any = None
     documents: list[dict[str, Any]] = field(default_factory=list)
+    history: bool = True  # seed two years of past statements (ledger and vector index); False only for tests
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
@@ -117,7 +120,7 @@ class DemoService:
         """A reused ``--workdir`` already holds documents; list them again."""
         for name, doc_id, status, conf, issues in self.conn.execute(
                 "SELECT source_name, document_id, reconciliation_status, document_confidence, issues_json FROM documents "
-                "ORDER BY ingested_at"):
+                "WHERE source_name NOT LIKE ? ORDER BY ingested_at", (HISTORY_PREFIX + "%",)):
             self.documents.append({"name": name, "document_id": doc_id, "outcome": status, "confidence": conf,
                                    "uploaded_by": "", "issues": [{"code": i.get("code"), "message": i.get("message")}
                                                                  for i in json.loads(issues)]})
@@ -131,14 +134,32 @@ class DemoService:
         self._ingest(SOMAL, demo_statements()[name].encode(), name, corr)
         for doc in demo_policy_documents():
             self.retrieval.index(SOMAL, doc, correlation_id=corr, at=DEMO_AS_OF)
+        if self.history:
+            self._seed_history(corr)
 
-    def _ingest(self, actor: Actor, content: bytes, name: str, corr: str) -> dict[str, Any]:
+    def _seed_history(self, corr: str) -> None:
+        """Two years of past statements: exact rows in the ledger, the same text in the vector index. Not listed in the UI."""
+        if self.conn.execute("SELECT 1 FROM documents WHERE source_name LIKE ? LIMIT 1", (HISTORY_PREFIX + "%",)).fetchone():
+            return  # already seeded: a reused --workdir
+        for name, member, csv_text in history_statements():
+            self._ingest(MEMBERS[member], csv_text.encode(), name, corr, listed=False)
+        for doc in brokerage_summaries():
+            self.retrieval.index(SOMAL, doc, correlation_id=corr, at=DEMO_AS_OF)
+
+    def _ingest(self, actor: Actor, content: bytes, name: str, corr: str, *, listed: bool = True) -> dict[str, Any]:
         result = ingest_statement(self.store, self.categorizer, actor, content, name, purpose="statement_ingestion",
                                   correlation_id=corr, at=DEMO_AS_OF)
+        if result.status is ReconciliationStatus.RECONCILED:  # only a statement that balances is searchable by meaning
+            try:
+                self.retrieval.index(actor, statement_source(parse_statement(content, name), name, result.document_id),
+                                     correlation_id=corr, at=DEMO_AS_OF)
+            except AuthorizationError:
+                pass  # the uploader may write the ledger but not the index: the ledger copy still stands
         doc = {"name": name, "document_id": result.document_id, "outcome": result.status.value,
                "confidence": result.document_confidence, "uploaded_by": actor.member_id,
                "issues": [{"code": i.code, "message": i.message} for i in result.issues]}
-        self.documents.append(doc)
+        if listed:
+            self.documents.append(doc)
         return doc
 
     # --- operations ---------------------------------------------------------------------------
