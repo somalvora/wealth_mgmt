@@ -126,6 +126,7 @@ function say(who, text, extra) {
 
 function renderDocs() {
   const box = $('docs'); box.replaceChildren();
+  if (state.history) box.appendChild(el('div', 'mute', state.history));
   if (!state.documents.length) box.appendChild(el('div', 'mute', 'None yet.'));
   state.documents.forEach(d => {
     const r = el('div', 'doc'); r.appendChild(el('span', 'n', d.name)); r.appendChild(pill(d.outcome, d.outcome));

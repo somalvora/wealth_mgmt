@@ -41,7 +41,7 @@ from household_agent.authz import Actor, AuthorizationError, Authorizer, Consent
 from household_agent.categorize import Categorizer
 from household_agent.consent import ConsentStore
 from household_agent.evals import evaluate, generate_scenarios
-from household_agent.history import HISTORY_PREFIX, brokerage_summaries, history_statements, statement_source
+from household_agent.history import HISTORY_PREFIX, brokerage_summaries, history_statements, history_summary, statement_source
 from household_agent.ingest import StatementParseError, parse_statement
 from household_agent.ingest.pdf_statement import MAX_PDF_BYTES
 from household_agent.ledger import DuplicateDocumentError, LedgerStore
@@ -412,7 +412,8 @@ def create_app(service: DemoService, *, model_label: str = "offline playback") -
     @app.get("/api/state")
     def state() -> dict[str, Any]:
         return {"model": model_label, "members": [{"id": m, "role": a.role.value} for m, a in MEMBERS.items() if m != "casey_cpa"],
-                "documents": service.documents, "suggestions": SUGGESTIONS,
+                "documents": service.documents, "history": history_summary() if service.history else "",
+                "suggestions": SUGGESTIONS,
                 "samples": [{"name": s.name, "member": s.member, "description": s.description, "expect": s.expect}
                             for s in catalog.values() if not (service.history and s.name == CURRENT_RENTAL_PDF)]}
 
