@@ -377,6 +377,10 @@ Security: the page writes model and PDF text with `textContent` only (a test for
 
 `sample_statements.py` generates the five deterministic PDFs with reportlab (`invariant=1`), including a tampered one and an image-only scan.
 
+## 4j. Two years of history (`history.py`)
+
+The demo starts with 24 months of fictional past statements (Oct 2024 to Sep 2026): 70 statements across the rental account, Somal's checking and Sayali's card, plus 8 quarterly brokerage summaries. Two months are left out because the demo owns them (the Oct 2025 rental statement and Somal's corrupt Sep 2026 sample). `DemoService._seed_history` ingests each statement as its owner (exact rows, ledger) and every reconciled statement, uploads included, is also indexed into the `financial_history` collection (`statement_source`: header lines, then `date,description,amount` rows, chunked 25 rows at a time with the header repeated). A statement that does not balance is never indexed. History files are named `hist_YYYY_MM_<account>.csv` and are not listed in the UI. `DemoService(history=False)` turns it off (tests). Known limits: the ledger tools were not built for 24-month comparisons, a question about investing routes to the allocation planner (no history search), and a plan can be built from September balances while October is missing.
+
 ## 5. Storage schema (SQLite)
 
 All tables are **append-only**: `BEFORE UPDATE` and `BEFORE DELETE` triggers raise an error.
