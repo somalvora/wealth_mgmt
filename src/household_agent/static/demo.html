@@ -279,16 +279,19 @@ async function init() {
   $('model').textContent = 'model: ' + state.model;
   state.members.forEach(m => { const o = el('option', null, m.id); o.value = m.id; $('member').appendChild(o); });
   const roleOf = () => state.members.find(m => m.id === $('member').value).role;
-  $('role').textContent = roleOf(); $('member').onchange = () => { $('role').textContent = roleOf(); $('sharemsg').textContent = ''; renderConsent(); };
+  // Setting .value from script does not fire onchange, so chips and sample buttons call this too.
+  const syncMember = () => { $('role').textContent = roleOf(); $('sharemsg').textContent = ''; return renderConsent(); };
+  const pickMember = id => { $('member').value = id; return syncMember(); };
+  $('role').textContent = roleOf(); $('member').onchange = syncMember;
   $('sharebtn').onclick = () => shareCall('/api/consent/share', { member: $('member').value, grantee: $('sharewith').value, account_id: $('shareacct').value });
   $('runeval').onclick = async () => { $('runeval').disabled = true; $('evalsum').textContent = 'Running…';
     try { renderEval((await api('/api/eval/run', { method: 'POST' })).body.report); } finally { $('runeval').disabled = false; } };
   renderEval((await api('/api/eval')).body.report);
   state.suggestions.forEach(s => { const c = el('button', 'chip', s.text.length > 70 ? s.text.slice(0, 67) + '…' : s.text);
-    c.title = s.text; c.onclick = () => { $('member').value = s.member; $('msg').value = s.text; $('msg').focus(); }; $('chips').appendChild(c); });
+    c.title = s.text; c.onclick = () => { pickMember(s.member); $('msg').value = s.text; $('msg').focus(); }; $('chips').appendChild(c); });
   state.samples.forEach(s => {
     const r = el('div', 'sample'), d = el('div', 'd', s.description); d.appendChild(el('div', 'mute', 'expect: ' + s.expect));
-    const b = el('button', null, 'Upload'); b.onclick = async () => { $('member').value = s.member;
+    const b = el('button', null, 'Upload'); b.onclick = async () => { pickMember(s.member);
       upload(s.name, await (await fetch('/api/samples/' + encodeURIComponent(s.name))).blob()); };
     const a = el('a', 'mute', 'download'); a.href = '/api/samples/' + encodeURIComponent(s.name);
     r.append(d, b, a); $('samples').appendChild(r); });

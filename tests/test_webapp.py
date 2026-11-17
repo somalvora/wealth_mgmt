@@ -335,3 +335,27 @@ def test_asking_about_someone_elses_private_account_is_refused_out_loud_until_it
     client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": grant["grant_id"]})
     assert ask()["status"] == "denied"
     assert ask("What did somal spend at Safeway?")["status"] != "denied"  # your own name is never a reason to refuse
+
+
+def test_a_question_about_the_joint_rental_account_is_not_refused_for_naming_the_other_owner(client):
+    ask = lambda member, text: client.post("/api/chat", json={"member": member, "message": text}).json()  # noqa: E731
+    assert ask("sayali", "Did Somal pay the Unit B property tax?")["status"] != "denied"
+    assert ask("somal", "How much rent did Sayali and I collect?")["status"] != "denied"
+    assert ask("sayali", "How much did Somal's checking spend at Safeway?")["status"] == "denied"  # still private
+
+
+def test_the_refusal_names_the_private_account_and_does_not_offer_a_share_a_dependent_cannot_get(client):
+    body = client.post("/api/chat", json={"member": "viaan", "message": "What did Somal spend on groceries?"}).json()
+    text = body["alerts"][0]["text"]
+    assert body["status"] == "denied" and "Dependents can't be given access" in text and "can share it" not in text
+    assert "private checking account" in text and "rental" not in text
+    deny = [e for e in body["trace"] if e["decision"] == "deny"]
+    assert [e["resource"] for e in deny] == ["account:acct_somal_checking"] and "dependent" in deny[0]["reason"]
+    adult = client.post("/api/chat", json={"member": "somal", "message": "What did Sayali's card spend at Safeway?"}).json()
+    assert "private credit card" in adult["alerts"][0]["text"] and "can share it" in adult["alerts"][0]["text"]
+
+
+def test_chips_and_sample_buttons_refresh_the_role_and_share_panel_when_they_pick_a_member(client):
+    page = client.get("/").text
+    assert "pickMember(s.member)" in page and page.count("pickMember(s.member)") == 2
+    assert "$('member').value = s.member" not in page  # setting .value does not fire onchange
