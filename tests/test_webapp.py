@@ -38,6 +38,7 @@ def test_state_lists_members_samples_and_the_seeded_history(client):
     assert len(body["samples"]) == 5 and body["model"] == "offline playback"
     assert "2026_10_rental_checking.pdf" not in [x["name"] for x in body["samples"]]  # preloaded, not an upload step
     assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv", "2026_10_rental_checking.csv"]
+    assert body["history"] == "History on file: Oct 2024 to Sep 2026, monthly statements for all three accounts."
 
 
 def test_the_page_is_served_and_never_writes_model_text_as_html(client):
@@ -226,6 +227,7 @@ def test_a_crashed_ledger_analyst_is_not_reported_as_a_missing_statement():
 def test_the_no_figures_note_does_not_assume_the_missing_statement_is_this_months():
     from household_agent.agents import NO_LEDGER_FIGURES
     assert "past month or year" in NO_LEDGER_FIGURES and "this month's" not in NO_LEDGER_FIGURES
+    assert "already on file" in NO_LEDGER_FIGURES  # history is preloaded, so "upload it" alone would mislead
 
 
 @pytest.fixture(scope="module")

@@ -38,6 +38,13 @@ def months() -> list[str]:
     return out
 
 
+def history_summary() -> str:
+    """One line for the UI: what is already on file, so nobody wonders why the document list is short."""
+    ms = months()
+    label = lambda ym: calendar.month_abbr[int(ym[5:])] + " " + ym[:4]  # noqa: E731
+    return f"History on file: {label(ms[0])} to {label(ms[-1])}, monthly statements for all three accounts."
+
+
 def _money(cents: int) -> str:
     return f"{'-' if cents < 0 else ''}{abs(cents) // 100}.{abs(cents) % 100:02d}"
 

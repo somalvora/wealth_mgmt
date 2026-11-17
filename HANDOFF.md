@@ -37,9 +37,9 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
    `git remote set-url origin https://somalvora@github.com/somalvora/wealth_mgmt.git` and `gh auth setup-git -h github.com`.
    Then push the branch and open a PR. After the PR, dispatch one `code-review` agent on it.
 2. Rehearse the four live chips once on Gemini; check the numbers (groceries 2025 should be $3,269.43).
-3. Optional: replace the "Documents on file" list with a one-line summary (history is hidden from it, so it looks nearly empty).
+3. DONE: the Documents panel now starts with a one-line history summary (`/api/state` `history`).
 4. Optional: the old eval-gap ideas (more adversarial scenarios, indirect injection, citation cases, non-regression baseline).
-5. The "upload it and ask again" hint in `agents.py` (~line 582) is shown when the ledger analyst finds no figures; it is misleading now that history is preloaded.
+5. DONE: the no-figures hint in `agents.py` now says the statements on file did not cover it, and only then suggests an upload.
 
 ## Run it
 ```
