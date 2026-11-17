@@ -46,7 +46,7 @@ from household_agent.ingest import StatementParseError, parse_statement
 from household_agent.ingest.pdf_statement import MAX_PDF_BYTES
 from household_agent.ledger import DuplicateDocumentError, LedgerStore
 from household_agent.mcp_server import MEMBERS
-from household_agent.models import Action, ReconciliationStatus, Role
+from household_agent.models import Action, OwnerScope, ReconciliationStatus, Role
 from household_agent.pipeline import ingest_statement
 from household_agent.plan_inputs import Liability, ledger_inputs_for
 from household_agent.retrieval import RetrievalService
@@ -97,6 +97,7 @@ GATE_LABELS = {
     "privacy_canary_exposures": "Planted secrets that leaked",
 }
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_JOINT_TOPIC = re.compile(r"\b(rent|rental|rents|tenants?|lease|unit [a-z]|property tax(?:es)?|mortgage)\b")  # the joint rental account
 MAX_MESSAGE_CHARS = 2000
 
 
@@ -272,25 +273,36 @@ class DemoService:
         """Say so out loud when the question names someone whose accounts the asker may not read. Without this the
         analyst is simply never offered those accounts and the page shows a vague "no figures" instead of a refusal."""
         text = message.lower()
-        denied: list[tuple[str, str]] = []
+        readable = lambda acct: self.store.authorizer.authorize(  # noqa: E731
+            actor, acct.account_id, Action.READ, "historical_comparison", DEMO_AS_OF)
+        # A question about rent or the property tax is about the joint account, which the asker may read, even when it names
+        # a member who also has a private account they may not.
+        if _JOINT_TOPIC.search(text) and any(a.owner_scope is OwnerScope.JOINT and readable(a) for a in ACCOUNTS):
+            return None
+        denied: list[tuple[str, Any]] = []
         for other in MEMBERS:
             if other in (member, "casey_cpa") or not re.search(rf"\b{re.escape(other)}\b", text):
                 continue
-            for acct in ACCOUNTS:
-                if other in acct.owner_member_ids and not self.store.authorizer.authorize(
-                        actor, acct.account_id, Action.READ, "historical_comparison", DEMO_AS_OF):
-                    denied.append((other, acct.account_id))
+            denied += [(other, a) for a in ACCOUNTS
+                       if a.owner_scope is OwnerScope.PRIVATE and other in a.owner_member_ids and not readable(a)]
         if not denied:
             return None
-        for other, account_id in denied:
+        dependent = actor.role is Role.DEPENDENT
+        for other, acct in denied:
             self.store.audit.append(correlation_id=corr, actor_id=actor.member_id, household_id=actor.household_id,
-                                    action="read", decision="deny", resource=f"account:{account_id}",
+                                    action="read", decision="deny", resource=f"account:{acct.account_id}",
                                     purpose="historical_comparison", acting_agent="supervisor",
-                                    reason=f"{member} has no consent to read {other}'s account", at=DEMO_AS_OF)
+                                    reason=(f"{member} is a dependent: dependents have no ledger access" if dependent
+                                            else f"{member} has no consent to read {other}'s account"), at=DEMO_AS_OF)
         owners = sorted({o for o, _ in denied})
-        names = " and ".join(f"{o}'s" for o in owners)
-        alert = (f"Refused: {names} private account is not shared with {member}, so I did not look at it. "
-                 f"{owners[0]} can share it from \"Share my accounts\"; you can then ask again.")
+        kinds = sorted({a.kind.replace("_", " ") for _, a in denied})
+        what = " and ".join(f"{o}'s" for o in owners) + f" private {' and '.join(kinds)}" + (" account" if "card" not in kinds[-1] else "")
+        if dependent:
+            alert = (f"Refused: {what} is not available to {member}, so I did not look at it. Dependents can't be given "
+                     f"access to ledger data.")
+        else:
+            alert = (f"Refused: {what} is not shared with {member}, so I did not look at it. "
+                     f"{owners[0]} can share it from \"Share my accounts\"; you can then ask again.")
         return {"correlation_id": corr, "status": "denied", "intent": "historical_comparison", "statements": [],
                 "questions": [], "alerts": [{"text": alert}], "needs_review": False, "external_action": None,
                 "agents": [], "approval": None, "trace": self.trace(corr)}

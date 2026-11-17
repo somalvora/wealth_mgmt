@@ -31,6 +31,11 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - Gemini free tier is about 20 requests/day per model. 429 (quota) and 503 (high demand) show as an amber message. Answers are
   cached in `.cache/llm.sqlite`, so rehearse each chip once, then record.
 
+## Standing instruction (this window)
+Do NOT dispatch a code-review agent on PRs opened in this window. This overrides the usual "review every new PR" default and the
+PostToolUse hook nudge to run pr-auto-review after `git push` or `gh pr create`. PR #20 already had its one review; its 11 findings
+are under open item 6.
+
 ## Open items
 1. **Push and PR.** `git push` fails with 403: the only github.com login is `somal-vora_sfemu`, which cannot write to
    `somalvora/wealth_mgmt`. Fix once: `! gh auth login -h github.com -p https -w` (personal account), then
@@ -40,6 +45,20 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 3. DONE: the Documents panel now starts with a one-line history summary (`/api/state` `history`).
 4. Optional: the old eval-gap ideas (more adversarial scenarios, indirect injection, citation cases, non-regression baseline).
 5. DONE: the no-figures hint in `agents.py` now says the statements on file did not cover it, and only then suggests an upload.
+
+6. PR #20 review findings, not yet fixed. PR #20 is a draft with placeholder title `@W-XXXXXXXX : ...`; retitle once the work item
+   number is known.
+   - DONE (branch fix-demo-refusal-and-member-sync): #4 chips and sample Upload buttons now call `pickMember` so the role label and
+     Share panel follow; #1 refusal only considers PRIVATE accounts and skips rent/lease/property-tax questions when the asker can
+     read the joint account; #5 refusal names "X's private checking account / credit card", and for a dependent says dependents
+     can't be given access (no "can share it") and audits that reason.
+   - Still open from the fix-first group: #3 refusal reads consent grants outside self.lock (webapp.py ~240).
+   - Known limit of #1: the joint-topic check is keyword based (`_JOINT_TOPIC` in webapp.py), so a question mixing a private-account
+     name with the word "rent" is not refused here; the analyst still is not offered the unreadable account.
+   - Then: #2 refusal runs before routing, pre-empting money-movement and out-of-scope refusals (240-242); #11 raw `str(e)[:200]`
+     reaches the page (webapp.py 266, demo.html 202) and failure_notes duplicates it.
+   - Low: #9 no-figures hint can be false (unshared account, exhausted budget); #8 `LIKE 'hist_%'` treats `_` as a wildcard; #6 purpose
+     hard-coded to historical_comparison; #7 name matching only member ids; #10 audit and consent panels not filtered by member.
 
 ## Run it
 ```
