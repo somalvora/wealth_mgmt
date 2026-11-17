@@ -70,6 +70,15 @@ Start with a fresh restart of the app so the document list is clean. Pick the me
 
 Only the questions above were tried on live Gemma. Other questions (for example about the lease, the 2024 county bill or Somal's private note) are untested.
 
+## New UI panels (use these for the visual parts)
+
+- **Share my accounts.** Upload Sayali's card as sayali, ask as somal "How much did Sayali's card spend at Safeway last month?" (no answer), then as sayali press Share with somal, and ask again as somal. Press Revoke and ask once more: refused again.
+- **Injection sample.** Upload `2026_09_somal_checking_injection.pdf` as somal. It reconciles; the Audit trail list shows an `index` event with an "instruction-like text flagged" tag, and nothing else happens. Do not upload it together with the tampered September sample on camera unless you want both rows in the list.
+- **Audit trail list.** Updates after every upload, question, approval and consent change; Verify chain adds the intact check.
+- **Evaluation results.** Press Run the checks: 13 plain-English gates with pass/fail, about 2 s, offline keyword router (it checks the guardrails, not model quality, and says so on the panel).
+- **Chips.** Transfer refusal, injection in the request, the 2023 question, the lease question, Viaan asking about Somal's account, the Sayali-card question and the weather question are one click each.
+- Untested on live Gemma: the new chip questions. Rehearse them once to warm the LLM cache.
+
 ## Evaluation numbers to quote
 
 Confirm each number against the README and the design document before recording. These came from runs during development, all on synthetic data.

@@ -6,7 +6,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from household_agent.ingest import parse_statement
+from household_agent.models import Action
 from household_agent.sample_statements import samples
+from household_agent.synthetic import DEMO_AS_OF
 from household_agent.webapp import STATIC, DemoService, create_app
 
 TAX_QUESTION = ("I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last "
@@ -33,7 +35,7 @@ def upload(client, name, member="somal", content=None):
 def test_state_lists_members_samples_and_the_seeded_history(client):
     body = client.get("/api/state").json()
     assert {m["id"] for m in body["members"]} == {"somal", "sayali", "viaan"}
-    assert len(body["samples"]) == 5 and body["model"] == "offline playback"
+    assert len(body["samples"]) == 6 and body["model"] == "offline playback"
     assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv"]
 
 
@@ -47,7 +49,7 @@ def test_every_sample_pdf_is_deterministic_and_parses_or_fails_as_labelled():
     a, b = samples(), samples()
     assert all(a[n].content == b[n].content for n in a)
     for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf",
-                 "2026_09_somal_checking_tampered.pdf"):
+                 "2026_09_somal_checking_tampered.pdf", "2026_09_somal_checking_injection.pdf"):
         assert parse_statement(a[name].content, name).rows
 
 
@@ -240,3 +242,80 @@ def shared_service(tmp_path_factory):
 def test_property_no_upload_is_ever_a_server_error(shared_service, content):
     code, body = shared_service.upload("somal", "fuzz.pdf", content)
     assert code in (200, 403, 409, 422) and body["name"] == "fuzz.pdf"
+
+
+# --- demo additions: chips, injection sample, audit list, consent panel, evaluation panel ------------------------
+
+def test_every_suggestion_chip_names_a_real_member(client):
+    body = client.get("/api/state").json()
+    members = {m["id"] for m in body["members"]}
+    assert len(body["suggestions"]) >= 9 and all(s["member"] in members for s in body["suggestions"])
+
+
+def test_the_injection_statement_reconciles_but_its_text_is_flagged_in_the_audit_list(client):
+    r = upload(client, "2026_09_somal_checking_injection.pdf")
+    assert r.status_code == 200 and r.json()["outcome"] == "reconciled"
+    recent = client.get("/api/audit").json()["recent"]
+    flagged = [e for e in recent if e["flagged"]]
+    assert flagged and flagged[0]["action"] == "index"
+    assert recent[0]["seq"] > recent[-1]["seq"]  # newest first
+    assert not any(e["flagged"] for e in client.get("/api/audit").json()["recent"] if e["action"] == "upload")
+
+
+def test_the_injection_and_tampered_samples_can_both_be_uploaded(client):
+    assert upload(client, "2026_09_somal_checking_tampered.pdf").json()["outcome"] == "unreconciled"
+    assert upload(client, "2026_09_somal_checking_injection.pdf").json()["outcome"] == "reconciled"
+
+
+def read(service, actor, account="acct_sayali_card"):
+    return bool(service.store.authorizer.authorize(actor, account, Action.READ, "historical_comparison", DEMO_AS_OF))
+
+
+def test_sharing_a_private_account_opens_it_and_revoking_closes_it_again(client, service):
+    somal, sayali = service.actor("somal"), service.actor("sayali")
+    assert not read(service, somal)
+    shared = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"})
+    assert shared.status_code == 200 and shared.json()["outcome"] == "shared"
+    assert read(service, somal)
+    view = client.get("/api/consent").json()
+    assert [(g["grantor"], g["grantee"], g["active"]) for g in view["shares"]] == [("sayali", "somal", True)]
+    # a share is read-only: it never lets Somal write to the account
+    assert not service.store.authorizer.authorize(somal, "acct_sayali_card", Action.UPLOAD, "statement_ingestion", DEMO_AS_OF)
+    grant_id = shared.json()["grant_id"]
+    revoked = client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": grant_id})
+    assert revoked.status_code == 200 and not read(service, somal)
+    assert client.get("/api/consent").json()["shares"][0]["active"] is False
+    actions = [e["action"] for e in client.get("/api/audit").json()["recent"]]
+    assert "consent_grant" in actions and "consent_revoke" in actions
+
+
+def test_only_the_owner_may_share_and_only_the_grantor_may_revoke(client, service):
+    other = client.post("/api/consent/share", json={"member": "somal", "grantee": "sayali", "account_id": "acct_sayali_card"})
+    assert other.status_code == 403 and other.json()["outcome"] == "refused"
+    kid = client.post("/api/consent/share", json={"member": "viaan", "grantee": "somal", "account_id": "acct_somal_checking"})
+    assert kid.status_code == 403
+    to_kid = client.post("/api/consent/share", json={"member": "somal", "grantee": "viaan", "account_id": "acct_somal_checking"})
+    assert to_kid.status_code == 422
+    grant = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"}).json()
+    steal = client.post("/api/consent/revoke", json={"member": "somal", "grant_id": grant["grant_id"]})
+    assert steal.status_code == 403 and read(service, service.actor("somal"))
+    assert client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": "grant_cpa_rental"}).status_code == 422
+
+
+def test_shares_survive_a_restart_of_the_service(tmp_path):
+    first = DemoService(tmp_path)
+    code, _ = first.share("sayali", "somal", "acct_sayali_card")
+    first.close()
+    again = DemoService(tmp_path)
+    try:
+        assert code == 200 and read(again, again.actor("somal"))
+    finally:
+        again.close()
+
+
+def test_the_evaluation_panel_runs_the_offline_gates_and_caches_the_result(client):
+    assert client.get("/api/eval").json()["report"] is None
+    report = client.post("/api/eval/run").json()["report"]
+    assert report["passed"] and len(report["gates"]) == 13 and report["scenarios"] > 200
+    assert all(g["label"] and g["label"] != g["name"] for g in report["gates"])
+    assert client.get("/api/eval").json()["report"]["gates"] == report["gates"]
