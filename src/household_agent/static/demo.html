@@ -201,7 +201,7 @@ async function send(text) {
     failed.forEach(a => say('bot', `${a.agent} failed: ${a.errors[0] || 'unknown'}`, m => m.classList.add('note')));
     if (b.approval) say('bot', b.approval.status === 'awaiting_approval' ? 'I drafted an allocation plan. It needs a household adult to approve it.'
       : 'No allocation plan was drafted.' + (b.approval.note ? ' ' + b.approval.note : ''), m => renderApproval(b.approval, m));
-    if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !failed.length)
+    if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !b.alerts.length && !failed.length)
       say('bot', b.intent === 'out_of_scope' ? 'That is outside what I can help with. I only answer questions about this household\'s money: spending history, tax treatment and allocation plans.'
         : `Done (${b.status}), nothing to report.`);
   }

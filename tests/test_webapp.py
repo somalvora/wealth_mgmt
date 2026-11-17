@@ -319,3 +319,19 @@ def test_the_evaluation_panel_runs_the_offline_gates_and_caches_the_result(clien
     assert report["passed"] and len(report["gates"]) == 13 and report["scenarios"] > 200
     assert all(g["label"] and g["label"] != g["name"] for g in report["gates"])
     assert client.get("/api/eval").json()["report"]["gates"] == report["gates"]
+
+
+def test_asking_about_someone_elses_private_account_is_refused_out_loud_until_it_is_shared(client):
+    def ask(text="How much did Sayali's card spend at Safeway in September 2026?"):
+        return client.post("/api/chat", json={"member": "somal", "message": text}).json()
+
+    body = ask()
+    assert body["status"] == "denied" and not body["statements"] and body["agents"] == []
+    assert "sayali" in body["alerts"][0]["text"].lower() and "not shared" in body["alerts"][0]["text"]
+    deny = [e for e in body["trace"] if e["decision"] == "deny"]
+    assert deny and deny[0]["resource"] == "account:acct_sayali_card"
+    grant = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"}).json()
+    assert ask()["status"] != "denied"
+    client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": grant["grant_id"]})
+    assert ask()["status"] == "denied"
+    assert ask("What did somal spend at Safeway?")["status"] != "denied"  # your own name is never a reason to refuse
