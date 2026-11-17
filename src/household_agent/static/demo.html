@@ -86,7 +86,7 @@
       <div id="shares"></div>
     </div>
     <div class="card">
-      <h2>Upload a statement (PDF or CSV)</h2>
+      <h2>Upload a statement (optional)</h2>
       <input type="file" id="file" accept=".pdf,.csv,application/pdf">
       <button id="up">Upload</button>
       <div class="mute" style="margin-top:6px">Or try a generated sample:</div>
@@ -296,7 +296,7 @@ async function init() {
   $('up').onclick = () => { const f = $('file').files[0]; if (f) upload(f.name, f); };
   $('verify').onclick = () => refreshAudit(true);
   await renderConsent(); refreshAudit();
-  say('bot', 'Hi. Upload a statement (or use a generated sample on the right), then ask a question. I only read what you are allowed to see.');
+  say('bot', 'Hi. Two years of statements for this household are already on file, so just ask a question or pick one below. I only read what you are allowed to see. Uploading is optional: it is there to show how bad or private statements are handled.');
 }
 init();
 </script>
