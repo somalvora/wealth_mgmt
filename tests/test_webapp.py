@@ -6,7 +6,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from household_agent.ingest import parse_statement
+from household_agent.models import Action
 from household_agent.sample_statements import samples
+from household_agent.synthetic import DEMO_AS_OF
 from household_agent.webapp import STATIC, DemoService, create_app
 
 TAX_QUESTION = ("I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last "
@@ -34,7 +36,9 @@ def test_state_lists_members_samples_and_the_seeded_history(client):
     body = client.get("/api/state").json()
     assert {m["id"] for m in body["members"]} == {"somal", "sayali", "viaan"}
     assert len(body["samples"]) == 5 and body["model"] == "offline playback"
-    assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv"]
+    assert "2026_10_rental_checking.pdf" not in [x["name"] for x in body["samples"]]  # preloaded, not an upload step
+    assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv", "2026_10_rental_checking.csv"]
+    assert body["history"] == "History on file: Oct 2024 to Sep 2026, monthly statements for all three accounts."
 
 
 def test_the_page_is_served_and_never_writes_model_text_as_html(client):
@@ -47,14 +51,14 @@ def test_every_sample_pdf_is_deterministic_and_parses_or_fails_as_labelled():
     a, b = samples(), samples()
     assert all(a[n].content == b[n].content for n in a)
     for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf",
-                 "2026_09_somal_checking_tampered.pdf"):
+                 "2026_09_somal_checking_tampered.pdf", "2026_09_somal_checking_injection.pdf"):
         assert parse_statement(a[name].content, name).rows
 
 
 def test_a_good_pdf_reconciles_and_is_listed(client):
-    r = upload(client, "2026_10_rental_checking.pdf")
+    r = upload(client, "2026_10_somal_checking.pdf")
     assert r.status_code == 200 and r.json()["outcome"] == "reconciled"
-    assert "2026_10_rental_checking.pdf" in [d["name"] for d in client.get("/api/state").json()["documents"]]
+    assert "2026_10_somal_checking.pdf" in [d["name"] for d in client.get("/api/state").json()["documents"]]
 
 
 def test_a_tampered_closing_balance_is_stored_unreconciled(client):
@@ -121,8 +125,7 @@ def test_a_reused_workdir_starts_again_and_lists_its_documents(tmp_path):
 
 
 def test_allocation_plans_use_only_what_the_asker_may_read(client):
-    for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf"):
-        upload(client, name)
+    upload(client, "2026_10_somal_checking.pdf")
     body = client.post("/api/chat", json={"member": "viaan", "message": "We have a surplus this month; how should we allocate it?"}).json()
     assert not (body.get("approval") or {}).get("plan", {}).get("allocation_minor")  # a dependent sees none of Somal's balances
 
@@ -139,8 +142,7 @@ def test_sample_downloads(client):
     assert client.get("/api/samples/..%2Fpyproject.toml").status_code == 404
 
 
-def test_the_tax_question_is_answered_with_evidence_after_the_upload(client):
-    upload(client, "2026_10_rental_checking.pdf")
+def test_the_tax_question_is_answered_with_evidence_with_no_upload(client):
     body = client.post("/api/chat", json={"member": "somal", "message": TAX_QUESTION, "correlation_id": "corr_ui_t1"}).json()
     assert body["status"] in ("completed", "needs_review") and body["intent"] == "historical_comparison_and_tax_context"
     assert body["statements"] and all(s["evidence_ids"] for s in body["statements"])
@@ -161,7 +163,7 @@ def test_an_unrelated_question_is_out_of_scope_and_the_page_says_so(client):
 
 
 def test_allocation_waits_for_an_adult_and_a_dependent_cannot_approve(client):
-    for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf"):
+    for name in ("2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf"):
         upload(client, name, member="sayali" if "sayali" in name else "somal")
     body = client.post("/api/chat", json={"member": "somal", "message": "We have a surplus this month; how should we allocate it?"}).json()
     assert body["status"] == "awaiting_approval" and body["approval"]["plan"]
@@ -201,7 +203,6 @@ def test_with_two_years_of_history_an_allocation_is_planned_from_the_latest_stat
 
 
 def test_ledger_reads_in_the_trace_name_the_agent(client):
-    upload(client, "2026_10_rental_checking.pdf")
     body = client.post("/api/chat", json={"member": "somal", "message": TAX_QUESTION}).json()
     reads = [e for e in body["trace"] if e["action"] == "read"]
     assert reads and all(e["agent"] for e in reads)
@@ -226,6 +227,7 @@ def test_a_crashed_ledger_analyst_is_not_reported_as_a_missing_statement():
 def test_the_no_figures_note_does_not_assume_the_missing_statement_is_this_months():
     from household_agent.agents import NO_LEDGER_FIGURES
     assert "past month or year" in NO_LEDGER_FIGURES and "this month's" not in NO_LEDGER_FIGURES
+    assert "already on file" in NO_LEDGER_FIGURES  # history is preloaded, so "upload it" alone would mislead
 
 
 @pytest.fixture(scope="module")
@@ -240,3 +242,96 @@ def shared_service(tmp_path_factory):
 def test_property_no_upload_is_ever_a_server_error(shared_service, content):
     code, body = shared_service.upload("somal", "fuzz.pdf", content)
     assert code in (200, 403, 409, 422) and body["name"] == "fuzz.pdf"
+
+
+# --- demo additions: chips, injection sample, audit list, consent panel, evaluation panel ------------------------
+
+def test_every_suggestion_chip_names_a_real_member(client):
+    body = client.get("/api/state").json()
+    members = {m["id"] for m in body["members"]}
+    assert len(body["suggestions"]) >= 8 and all(s["member"] in members for s in body["suggestions"])
+
+
+def test_the_injection_statement_reconciles_but_its_text_is_flagged_in_the_audit_list(client):
+    r = upload(client, "2026_09_somal_checking_injection.pdf")
+    assert r.status_code == 200 and r.json()["outcome"] == "reconciled"
+    recent = client.get("/api/audit").json()["recent"]
+    flagged = [e for e in recent if e["flagged"]]
+    assert flagged and flagged[0]["action"] == "index"
+    assert recent[0]["seq"] > recent[-1]["seq"]  # newest first
+    assert not any(e["flagged"] for e in client.get("/api/audit").json()["recent"] if e["action"] == "upload")
+
+
+def test_the_injection_and_tampered_samples_can_both_be_uploaded(client):
+    assert upload(client, "2026_09_somal_checking_tampered.pdf").json()["outcome"] == "unreconciled"
+    assert upload(client, "2026_09_somal_checking_injection.pdf").json()["outcome"] == "reconciled"
+
+
+def read(service, actor, account="acct_sayali_card"):
+    return bool(service.store.authorizer.authorize(actor, account, Action.READ, "historical_comparison", DEMO_AS_OF))
+
+
+def test_sharing_a_private_account_opens_it_and_revoking_closes_it_again(client, service):
+    somal, sayali = service.actor("somal"), service.actor("sayali")
+    assert not read(service, somal)
+    shared = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"})
+    assert shared.status_code == 200 and shared.json()["outcome"] == "shared"
+    assert read(service, somal)
+    view = client.get("/api/consent").json()
+    assert [(g["grantor"], g["grantee"], g["active"]) for g in view["shares"]] == [("sayali", "somal", True)]
+    # a share is read-only: it never lets Somal write to the account
+    assert not service.store.authorizer.authorize(somal, "acct_sayali_card", Action.UPLOAD, "statement_ingestion", DEMO_AS_OF)
+    grant_id = shared.json()["grant_id"]
+    revoked = client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": grant_id})
+    assert revoked.status_code == 200 and not read(service, somal)
+    assert client.get("/api/consent").json()["shares"][0]["active"] is False
+    actions = [e["action"] for e in client.get("/api/audit").json()["recent"]]
+    assert "consent_grant" in actions and "consent_revoke" in actions
+
+
+def test_only_the_owner_may_share_and_only_the_grantor_may_revoke(client, service):
+    other = client.post("/api/consent/share", json={"member": "somal", "grantee": "sayali", "account_id": "acct_sayali_card"})
+    assert other.status_code == 403 and other.json()["outcome"] == "refused"
+    kid = client.post("/api/consent/share", json={"member": "viaan", "grantee": "somal", "account_id": "acct_somal_checking"})
+    assert kid.status_code == 403
+    to_kid = client.post("/api/consent/share", json={"member": "somal", "grantee": "viaan", "account_id": "acct_somal_checking"})
+    assert to_kid.status_code == 422
+    grant = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"}).json()
+    steal = client.post("/api/consent/revoke", json={"member": "somal", "grant_id": grant["grant_id"]})
+    assert steal.status_code == 403 and read(service, service.actor("somal"))
+    assert client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": "grant_cpa_rental"}).status_code == 422
+
+
+def test_shares_survive_a_restart_of_the_service(tmp_path):
+    first = DemoService(tmp_path)
+    code, _ = first.share("sayali", "somal", "acct_sayali_card")
+    first.close()
+    again = DemoService(tmp_path)
+    try:
+        assert code == 200 and read(again, again.actor("somal"))
+    finally:
+        again.close()
+
+
+def test_the_evaluation_panel_runs_the_offline_gates_and_caches_the_result(client):
+    assert client.get("/api/eval").json()["report"] is None
+    report = client.post("/api/eval/run").json()["report"]
+    assert report["passed"] and len(report["gates"]) == 13 and report["scenarios"] > 200
+    assert all(g["label"] and g["label"] != g["name"] for g in report["gates"])
+    assert client.get("/api/eval").json()["report"]["gates"] == report["gates"]
+
+
+def test_asking_about_someone_elses_private_account_is_refused_out_loud_until_it_is_shared(client):
+    def ask(text="How much did Sayali's card spend at Safeway in September 2026?"):
+        return client.post("/api/chat", json={"member": "somal", "message": text}).json()
+
+    body = ask()
+    assert body["status"] == "denied" and not body["statements"] and body["agents"] == []
+    assert "sayali" in body["alerts"][0]["text"].lower() and "not shared" in body["alerts"][0]["text"]
+    deny = [e for e in body["trace"] if e["decision"] == "deny"]
+    assert deny and deny[0]["resource"] == "account:acct_sayali_card"
+    grant = client.post("/api/consent/share", json={"member": "sayali", "grantee": "somal", "account_id": "acct_sayali_card"}).json()
+    assert ask()["status"] != "denied"
+    client.post("/api/consent/revoke", json={"member": "sayali", "grant_id": grant["grant_id"]})
+    assert ask()["status"] == "denied"
+    assert ask("What did somal spend at Safeway?")["status"] != "denied"  # your own name is never a reason to refuse

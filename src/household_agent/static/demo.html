@@ -42,6 +42,13 @@
   #trace { overflow:auto; max-height:260px; }
   .sample { display:flex; gap:8px; align-items:center; padding:4px 0; border-top:1px solid var(--line); }
   .sample .d { flex:1; font-size:12px; }
+  .flag { background:#fff3cf; color:var(--warn); }
+  .pass { background:#dcf5e7; color:var(--ok); } .fail { background:#fde4e1; color:var(--bad); }
+  .gate { display:flex; gap:8px; align-items:baseline; padding:3px 0; border-top:1px solid var(--line); font-size:13px; }
+  .gate .l { flex:1; } .gate .v { font-variant-numeric:tabular-nums; }
+  #auditlist { max-height:220px; overflow:auto; margin-top:6px; }
+  .share { display:flex; gap:8px; align-items:center; padding:4px 0; border-top:1px solid var(--line); font-size:13px; }
+  .share .n { flex:1; }
   .plan { background:#f3f6ff; border:1px solid #cfdcfa; border-radius:8px; padding:8px; margin-top:6px; }
 </style>
 </head>
@@ -69,7 +76,17 @@
       <div class="row"><select id="member"></select><span class="mute" id="role"></span></div>
     </div>
     <div class="card">
-      <h2>Upload a statement (PDF or CSV)</h2>
+      <h2>Share my accounts (consent)</h2>
+      <div class="mute" id="shareintro"></div>
+      <div class="row" id="shareform" style="margin-top:6px">
+        <select id="shareacct"></select><span class="mute">with</span><select id="sharewith"></select>
+        <button id="sharebtn">Share (read only)</button>
+      </div>
+      <div class="mute" id="sharemsg" style="margin-top:4px"></div>
+      <div id="shares"></div>
+    </div>
+    <div class="card">
+      <h2>Upload a statement (optional)</h2>
       <input type="file" id="file" accept=".pdf,.csv,application/pdf">
       <button id="up">Upload</button>
       <div class="mute" style="margin-top:6px">Or try a generated sample:</div>
@@ -80,6 +97,14 @@
     <div class="card">
       <h2>Audit trail</h2>
       <div class="row"><button id="verify">Verify chain</button><span id="audit" class="mute"></span></div>
+      <div id="auditlist"></div>
+    </div>
+    <div class="card">
+      <h2>Evaluation results</h2>
+      <div class="mute">The same checks the project is graded on: hundreds of test scenarios run against the real guardrails.</div>
+      <div class="row" style="margin:6px 0"><button id="runeval">Run the checks</button><span id="evalsum" class="mute"></span></div>
+      <div id="gates"></div>
+      <div class="mute" id="evalnote"></div>
     </div>
   </aside>
 </main>
@@ -101,6 +126,7 @@ function say(who, text, extra) {
 
 function renderDocs() {
   const box = $('docs'); box.replaceChildren();
+  if (state.history) box.appendChild(el('div', 'mute', state.history));
   if (!state.documents.length) box.appendChild(el('div', 'mute', 'None yet.'));
   state.documents.forEach(d => {
     const r = el('div', 'doc'); r.appendChild(el('span', 'n', d.name)); r.appendChild(pill(d.outcome, d.outcome));
@@ -139,7 +165,7 @@ function renderApproval(a, host) {
       if (!r.ok) { status.textContent = 'Error: ' + (typeof b.detail === 'string' ? b.detail : 'request failed'); return; }
       status.textContent = b.refused ? `Refused: ${b.reason}` : `Status: ${b.status}`;
       if (!b.refused) { yes.disabled = no.disabled = who.disabled = true; }
-      refreshTrace(a.thread_id);
+      refreshTrace(a.thread_id); refreshAudit();
     };
     yes.onclick = () => act(true); no.onclick = () => act(false);
     row.append(who, yes, no); plan.appendChild(row);
@@ -176,11 +202,11 @@ async function send(text) {
     failed.forEach(a => say('bot', `${a.agent} failed: ${a.errors[0] || 'unknown'}`, m => m.classList.add('note')));
     if (b.approval) say('bot', b.approval.status === 'awaiting_approval' ? 'I drafted an allocation plan. It needs a household adult to approve it.'
       : 'No allocation plan was drafted.' + (b.approval.note ? ' ' + b.approval.note : ''), m => renderApproval(b.approval, m));
-    if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !failed.length)
+    if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !b.alerts.length && !failed.length)
       say('bot', b.intent === 'out_of_scope' ? 'That is outside what I can help with. I only answer questions about this household\'s money: spending history, tax treatment and allocation plans.'
         : `Done (${b.status}), nothing to report.`);
   }
-  busy = false; $('send').disabled = false;
+  busy = false; $('send').disabled = false; refreshAudit();
 }
 
 async function upload(name, blob) {
@@ -190,6 +216,62 @@ async function upload(name, blob) {
   const text = b.reason ? `${name}: ${b.outcome} — ${b.reason}` : `${name}: ${b.outcome}` + ((b.issues || []).length ? ` (${b.issues.map(i => i.message).join('; ')})` : '');
   say('bot', text, m => m.classList.add(b.outcome === 'reconciled' ? 'bot' : 'note'));
   if (r.ok) { state.documents.push(b); renderDocs(); }
+  refreshAudit();
+}
+
+async function refreshAudit(verified) {
+  const b = (await api('/api/audit')).body;
+  if (verified) $('audit').textContent = b.intact ? `intact: ${b.events} chained events` : `BROKEN: ${b.reason}`;
+  const box = $('auditlist'); box.replaceChildren();
+  (b.recent || []).forEach(e => {
+    const r = el('div', 'ev'); r.appendChild(pill(e.decision, e.decision));
+    r.appendChild(el('span', null, `${e.actor} · ${e.action}` + (e.resource ? ` · ${e.resource}` : '')));
+    if (e.flagged) r.appendChild(pill('instruction-like text flagged', 'flag'));
+    if (e.reason) r.appendChild(el('span', 'mute', e.reason));
+    box.appendChild(r);
+  });
+}
+
+let consent = null;
+async function renderConsent() {
+  consent = (await api('/api/consent')).body;
+  const me = $('member').value, role = state.members.find(m => m.id === me).role;
+  const owned = consent.accounts.filter(a => a.owners.includes(me));
+  $('shareintro').textContent = owned.length
+    ? 'Let another adult read one of your accounts. Joint accounts need every owner to agree. You can take it back at any time.'
+    : `${me} owns no accounts, so there is nothing to share.`;
+  $('shareform').style.display = owned.length ? '' : 'none';
+  $('shareacct').replaceChildren(); $('sharewith').replaceChildren();
+  owned.forEach(a => { const o = el('option', null, `${a.account_id} (${a.scope})`); o.value = a.account_id; $('shareacct').appendChild(o); });
+  state.members.filter(m => m.id !== me && m.role !== 'dependent').forEach(m => { const o = el('option', null, m.id); o.value = m.id; $('sharewith').appendChild(o); });
+  const box = $('shares'); box.replaceChildren();
+  consent.shares.filter(g => g.active).forEach(g => {
+    const r = el('div', 'share'); r.appendChild(pill('shared', 'allow'));
+    r.appendChild(el('span', 'n', `${g.grantor} → ${g.grantee}: ${g.accounts.join(', ')}`));
+    const b = el('button', null, 'Revoke'); b.onclick = () => shareCall('/api/consent/revoke', { member: me, grant_id: g.grant_id });
+    r.appendChild(b); box.appendChild(r);
+  });
+}
+async function shareCall(path, payload) {
+  const r = await api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  const b = r.body;
+  $('sharemsg').textContent = r.ok ? (b.outcome === 'shared' ? 'Shared. They can now ask about this account.' : 'Revoked. The next question is refused again.')
+    : `${b.outcome || 'error'}: ${b.reason || (typeof b.detail === 'string' ? b.detail : 'request failed')}`;
+  await renderConsent(); refreshAudit();
+}
+
+function fmtValue(v) { return Number.isInteger(v) ? String(v) : v.toFixed(4).replace(/0+$/, ''); }
+function renderEval(rep) {
+  const box = $('gates'); box.replaceChildren();
+  if (!rep) { $('evalsum').textContent = ''; return; }
+  const ok = rep.gates.filter(g => g.passed).length;
+  $('evalsum').textContent = `${ok} of ${rep.gates.length} checks pass · ${rep.scenarios} scenarios`;
+  rep.gates.forEach(g => {
+    const r = el('div', 'gate'); r.appendChild(pill(g.passed ? 'pass' : 'fail', g.passed ? 'pass' : 'fail'));
+    r.appendChild(el('span', 'l', g.label)); r.appendChild(el('span', 'v', fmtValue(g.value)));
+    r.appendChild(el('span', 'mute', 'target ' + g.target)); box.appendChild(r);
+  });
+  $('evalnote').textContent = rep.note + (rep.not_covered.length ? ` Not covered: ${rep.not_covered.join(', ')}.` : '');
 }
 
 async function init() {
@@ -197,7 +279,11 @@ async function init() {
   $('model').textContent = 'model: ' + state.model;
   state.members.forEach(m => { const o = el('option', null, m.id); o.value = m.id; $('member').appendChild(o); });
   const roleOf = () => state.members.find(m => m.id === $('member').value).role;
-  $('role').textContent = roleOf(); $('member').onchange = () => $('role').textContent = roleOf();
+  $('role').textContent = roleOf(); $('member').onchange = () => { $('role').textContent = roleOf(); $('sharemsg').textContent = ''; renderConsent(); };
+  $('sharebtn').onclick = () => shareCall('/api/consent/share', { member: $('member').value, grantee: $('sharewith').value, account_id: $('shareacct').value });
+  $('runeval').onclick = async () => { $('runeval').disabled = true; $('evalsum').textContent = 'Running…';
+    try { renderEval((await api('/api/eval/run', { method: 'POST' })).body.report); } finally { $('runeval').disabled = false; } };
+  renderEval((await api('/api/eval')).body.report);
   state.suggestions.forEach(s => { const c = el('button', 'chip', s.text.length > 70 ? s.text.slice(0, 67) + '…' : s.text);
     c.title = s.text; c.onclick = () => { $('member').value = s.member; $('msg').value = s.text; $('msg').focus(); }; $('chips').appendChild(c); });
   state.samples.forEach(s => {
@@ -209,9 +295,9 @@ async function init() {
   renderDocs();
   $('form').onsubmit = e => { e.preventDefault(); send($('msg').value); };
   $('up').onclick = () => { const f = $('file').files[0]; if (f) upload(f.name, f); };
-  $('verify').onclick = async () => { const b = (await api('/api/audit')).body;
-    $('audit').textContent = b.intact ? `intact: ${b.events} chained events` : `BROKEN: ${b.reason}`; };
-  say('bot', 'Hi. Upload a statement (or use a generated sample on the right), then ask a question. I only read what you are allowed to see.');
+  $('verify').onclick = () => refreshAudit(true);
+  await renderConsent(); refreshAudit();
+  say('bot', 'Hi. Two years of statements for this household are already on file, so just ask a question or pick one below. I only read what you are allowed to see. Uploading is optional: it is there to show how bad or private statements are handled.');
 }
 init();
 </script>

@@ -578,8 +578,9 @@ class PolicyCompliance:
                            errors=errors, outputs={"final_answer_repaired": True} if repaired else {})
 
 
-NO_LEDGER_FIGURES = ("The ledger analyst found no verified figures for this question. If the statement it needs is not on "
-                     "file (it may be for a past month or year, or for the current month), upload it and ask again.")
+NO_LEDGER_FIGURES = ("The ledger analyst found no verified figures for this question. The statements already on file did not "
+                     "cover it. If it needs a statement that is not on file (it may be for a past month or year, or for the "
+                     "current month), upload that statement and ask again; otherwise rephrase the question.")
 
 
 # --- routing -----------------------------------------------------------------------------
