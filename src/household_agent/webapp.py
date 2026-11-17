@@ -233,6 +233,9 @@ class DemoService:
         if correlation_id is not None and not (correlation_id.startswith("corr_ui_") and not self.trace(correlation_id)):
             raise ValueError("correlation_id must start with corr_ui_ and be unused")  # else it could merge into another trace
         corr = correlation_id or f"corr_chat_{uuid.uuid4().hex[:8]}"
+        blocked = self._private_account_refusal(actor, member, message, corr)
+        if blocked:
+            return blocked
         with self.lock:
             self.plan_actor = actor
             offline = self.model_factory is None
@@ -260,6 +263,33 @@ class DemoService:
             "approval": self._approval_view(thread) if thread else None,
             "trace": self.trace(corr),
         }
+
+    def _private_account_refusal(self, actor: Actor, member: str, message: str, corr: str) -> dict[str, Any] | None:
+        """Say so out loud when the question names someone whose accounts the asker may not read. Without this the
+        analyst is simply never offered those accounts and the page shows a vague "no figures" instead of a refusal."""
+        text = message.lower()
+        denied: list[tuple[str, str]] = []
+        for other in MEMBERS:
+            if other in (member, "casey_cpa") or not re.search(rf"\b{re.escape(other)}\b", text):
+                continue
+            for acct in ACCOUNTS:
+                if other in acct.owner_member_ids and not self.store.authorizer.authorize(
+                        actor, acct.account_id, Action.READ, "historical_comparison", DEMO_AS_OF):
+                    denied.append((other, acct.account_id))
+        if not denied:
+            return None
+        for other, account_id in denied:
+            self.store.audit.append(correlation_id=corr, actor_id=actor.member_id, household_id=actor.household_id,
+                                    action="read", decision="deny", resource=f"account:{account_id}",
+                                    purpose="historical_comparison", acting_agent="supervisor",
+                                    reason=f"{member} has no consent to read {other}'s account", at=DEMO_AS_OF)
+        owners = sorted({o for o, _ in denied})
+        names = " and ".join(f"{o}'s" for o in owners)
+        alert = (f"Refused: {names} private account is not shared with {member}, so I did not look at it. "
+                 f"{owners[0]} can share it from \"Share my accounts\"; you can then ask again.")
+        return {"correlation_id": corr, "status": "denied", "intent": "historical_comparison", "statements": [],
+                "questions": [], "alerts": [{"text": alert}], "needs_review": False, "external_action": None,
+                "agents": [], "approval": None, "trace": self.trace(corr)}
 
     def _approval_view(self, thread_id: str) -> dict[str, Any]:
         state = self.approvals.get_state({"configurable": {"thread_id": thread_id}}).values
