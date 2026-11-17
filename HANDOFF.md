@@ -1,50 +1,55 @@
-# Handoff: household wealth agent demo
+# Handoff: demo UI additions (Household Wealth Agent)
 
-Written at the end of a session so the next one can pick up cold. Supersedes the earlier HANDOFF.md.
+Written 2026-11-17. Worktree: `/Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions`,
+branch `worktree-demo-ui-additions`, latest commit `e3a746e`. **Nothing is pushed and there is no PR.**
 
-## Where things stand
+## Goal
+Make the web demo (`uv run python -m household_agent.webapp ...`, page at 127.0.0.1:8000) show most of the system from the UI,
+so a video can be recorded by clicking only the suggestion chips. No upload step should be needed.
 
-- `main` has everything up to #17 plus the failure-notes / `cash_flow exclude_categories` work (branch `handoff-notes-2` carries the last handoff commit).
-- **Branch `history-seed` (this work, committed locally, NOT pushed, no PR yet)** adds two years of fictional history. Tests: **753 passing** (`PYTHONPATH=src .venv/bin/python -m pytest -q`; the config prints dots only, count with `--collect-only -q`).
-- Verified live this session (Gemma `gemini:gemma-4-26b-a4b-it`, sayali, card statement uploaded): "what is my inflow and outflow last month" passes `exclude_categories: ["transfer"]` on its own. Result: inflow $40.15 (a real `RETURN CLINIC 562` credit), outflow $3,878.51, net -$3,838.36. The $2,206.97 card payments are excluded. No fix needed.
+## What was built (all committed locally)
+- **Panels** (`static/demo.html`, `webapp.py`): Share my accounts (consent grant/revoke, `/api/consent*`), live Audit trail list
+  (`/api/audit` `recent`), Evaluation results (`/api/eval`, `/api/eval/run`, 13 gates, offline keyword router, about 2 s).
+- **Injection sample PDF** `2026_09_somal_checking_injection.pdf` (`sample_statements.py`): reconciles, text is flagged in the audit list.
+- **Preloaded data:** 2 years of statements (Oct 2024 to Sep 2026) for all three accounts, plus the October 2026 joint rental
+  statement (`CURRENT_RENTAL` in `webapp.py`), so the tax chip needs no upload. That sample PDF is hidden from the upload list.
+  Somal's Sep 2026 checking is intentionally empty (reserved for the tampered/injection upload samples); Oct 2026 checking and
+  Sayali's card are not preloaded.
+- **Explicit refusal** (`DemoService._private_account_refusal`): a question naming a member whose accounts the asker cannot read
+  returns status `denied`, an alert, and a `deny` audit row, before any model runs. Name-based only (no name means the analyst is
+  simply not offered those accounts and answers "no figures").
+- **Chips** (`SUGGESTIONS`, 8): tax (Oct 3,200 county payment), allocate surplus, transfer refusal, "What did I spend on groceries in
+  2025?" (expected $3,269.43, Somal's checking only), lease (rent and who pays property tax), viaan asks about Somal (refused),
+  somal asks about Sayali's card (refused until Sayali shares), weather (out of scope).
+- Page text says history is on file and upload is optional. `VIDEO.md` and `README.md` updated. Tests pass (`uv run python -m pytest tests -q`).
 
-## What `history-seed` does
+## Verified vs not
+- Verified: the full test suite; the grocery figures against the ledger (2025 = $3,269.43; 2026 Jan to Aug = $2,320.31, which is
+  why the old 2026 chip was misleading); both refusals offline.
+- **Not verified on live Gemini:** the answers for the tax, groceries 2025, lease and allocation chips, and the answer after Sayali
+  presses Share. Offline mode replays canned answers, so it cannot check those.
+- Gemini free tier is about 20 requests/day per model. 429 (quota) and 503 (high demand) show as an amber message. Answers are
+  cached in `.cache/llm.sqlite`, so rehearse each chip once, then record.
 
-- `src/household_agent/history.py`: `history_statements()` (70 statements, Oct 2024 to Sep 2026, deterministic per seed, each account chains from the previous closing balance), `brokerage_summaries()` (8 quarterly fictional summaries, Somal-private), `statement_source()` (a parsed statement as a searchable document).
-- `webapp.py`: `DemoService(history=True)` seeds the history on every start (ledger + `financial_history` vector collection). Every reconciled upload is also indexed; a statement that does not balance is not. History files are `hist_YYYY_MM_<account>.csv` and are not listed in the UI. `history=False` turns it off (tests).
-- `synthetic.py`: new category rule `ACME BROKERAGE` -> `investment_transfer`.
-- Seeded: 71 reconciled statements, 1,127 transactions, 103 vector chunks, 0.5 s with the default hash embeddings. A reused `--workdir` is not re-seeded, so changing `--embed-model` needs a fresh workdir.
-- Docs updated: README Testing table (753, `test_history.py` row), ARCHITECTURE section 4j, VIDEO.md count.
+## Open items
+1. **Push and PR.** `git push` fails with 403: the only github.com login is `somal-vora_sfemu`, which cannot write to
+   `somalvora/wealth_mgmt`. Fix once: `! gh auth login -h github.com -p https -w` (personal account), then
+   `git remote set-url origin https://somalvora@github.com/somalvora/wealth_mgmt.git` and `gh auth setup-git -h github.com`.
+   Then push the branch and open a PR. After the PR, dispatch one `code-review` agent on it.
+2. Rehearse the four live chips once on Gemini; check the numbers (groceries 2025 should be $3,269.43).
+3. DONE: the Documents panel now starts with a one-line history summary (`/api/state` `history`).
+4. Optional: the old eval-gap ideas (more adversarial scenarios, indirect injection, citation cases, non-regression baseline).
+5. DONE: the no-figures hint in `agents.py` now says the statements on file did not cover it, and only then suggests an upload.
 
-## What the vector database holds (answered this session)
+## Run it
+```
+cd "/Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions"
+cp ../../../.env .env        # the worktree lacks the git-ignored .env (needs GEMINI_API_KEY)
+uv run python -m household_agent.webapp --model gemini:gemma-4-26b-a4b-it
+```
+Omit `--model` for offline mode (consent, audit, eval and refusals work; real answers need a model).
 
-- Before: only the 9 chunks of policy documents (`policies_compliance`). Past statements were in SQLite only; `financial_history` was never filled by the app.
-- Embeddings: default `hash` (256-d bag of words, not semantic). `gemini:gemini-embedding-001` works on the key (3072-d) and ranked the right lease section first for a question with little word overlap; hash did not.
-- Probe scripts lived in `$CLAUDE_JOB_DIR/tmp` (gone with the job): index the policy docs, print raw cosine ranking and `retrieve_verified` per member.
-
-## First thing next session
-
-1. **Live Gemma test of the history (not yet seen).** The only attempt hit Gemini 503 (capacity) after the analyst read accounts and ran one calculation. Drive `DemoService(Path(tmp), model_factory=lambda role: model, embeddings=get_embeddings("gemini:gemini-embedding-001"))` with `model = get_chat_model("gemini:gemma-4-26b-a4b-it")` as somal, then `svc.chat("somal", q)`; print statements, questions, `agents[].errors` and the trace. Questions to try: "Compare my spending in October 2025 with October 2024", "Which past months looked like last month?", "Was it good to invest in stocks over the last two years?". If Gemini returns 429 or 503, tell the user and stop; do not guess.
-2. **Real-data request (not started).** The user gave two real Chase card exports and asked to use them "to generate data to have reality data": `~/Downloads/Chase0396_Activity_20261116.csv` (178 rows, Nov 2026) and `~/Downloads/Chase0396_Activity_20261116 (1).csv` (312 rows, back to Oct 2025). Columns: `Transaction Date, Post Date, Description, Category, Type, Amount, Memo`; types `Sale`, `Payment`; amounts negative for spending; HTML-escaped text (`&amp;`). It is not our `hh_statement_csv_v1` format. Plan: read the files only to learn the shape (merchant mix, category shares, amount ranges, rows per month, payment sizes, return frequency), then extend the generator (`synthetic._CARD_SPEND`, `history_statements`) with fictional merchants and similar distributions. **Do not copy real merchants, descriptions or amounts into the repo, tests or docs; keep the Chase files out of git.** Ask before building a converter for the real format (an earlier decision was a generator plus fictional data).
-3. Open issues found, not fixed (propose before changing):
-   - "Was investing good?" routes to `allocation_planning` (separate planner), so history search and the brokerage summaries are never used for it.
-   - The ledger analyst's small tool budget and `run_calculation` taking explicit transaction IDs make 24-month year-over-year questions awkward; a monthly-totals tool would help.
-   - A plan can be built from September balances while October is missing (no freshness note).
-4. Push `history-seed` and open a draft PR (see Pushing below). Skip pr-auto-review.
-
-## Ideas not done (ask before doing)
-
-- Fewer model calls per question; offering a spending-total calculation so Gemma's own arithmetic can cite a run; a bulk embedding call for seeding with a hosted embedding model (about 80 calls today); the UI test-idea list in `VIDEO.md`.
-
-## Conventions to keep
-
-- Every change: pytest tests (happy, negative, property), README Testing table and total, ARCHITECTURE.md, and the VIDEO.md test count.
-- Maintain only `agentic_ai_course_design.md` as the design source; the capstone doc is reference.
-- No local LLM on this laptop (tests use fakes); Gemma runs via the Gemini API or on the other laptop. Live checks are manual scripts, not pytest.
-- Never push to `main`.
-- Worktree: `/Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/tool-hints`. The shell guard refuses compound commands, heredocs with computed values, `git -c` with computed values, and a bare `hash` argument; use plain separate commands, script files and the Read/Edit/Write tools.
-- **Pushing:** the active `gh` account is `somal-vora_sfemu`, which cannot push to `somalvora/wealth_mgmt` (403). From a separate terminal: `setopt NO_BANG_HIST`, then `git -c credential.helper= -c 'credential.helper=!f() { echo username=somalvora; echo password=$(gh auth token --user somalvora); }; f' push -u origin history-seed`. Opening PRs also needs the `somalvora` account.
-
-## Resume prompt
-
-> Read HANDOFF.md in the tool-hints worktree (branch `history-seed`). First, retry the live Gemma test of the two-year history described under "First thing next session" item 1 (stop and tell me on any 429/503). Then, for the real Chase exports, learn only their shape and extend the fictional generator to match; never copy real rows into the repo. Propose design and tests before implementing the open issues.
+## Gotchas
+- Use `uv run python -m pytest` (not `uv run pytest`).
+- The worktree shell guard rejects heredocs, `$VAR` expansion and complex commands; use plain commands or the Write tool.
+- `demo.html` must never use `innerHTML` (a test enforces it). The hook flag on `webapp.py` `re.compile` (eval/exec) is a false positive.

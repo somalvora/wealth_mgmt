@@ -57,8 +57,8 @@ uv run python -c "from household_agent.sample_statements import samples; import 
 Start with a fresh restart of the app so the document list is clean. Pick the member from the "You are" box.
 
 1. As **somal**, upload `2026_10_rental_checking.pdf`. It reconciles.
-2. Ask: "I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last year, and how should it be accounted for?" Show the cited statements and the "What the agents did" trace. This took about 98 seconds on Gemma, so cut or talk over the wait.
-3. Upload `2026_10_somal_checking.pdf`. Ask: "We have a surplus this month; how should we allocate it?" A plan appears and waits for approval.
+2. (October 2026's joint rental statement and two years of history are already on file; no upload is needed.) Ask: "I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last year, and how should it be accounted for?" Show the cited statements and the "What the agents did" trace. This took about 98 seconds on Gemma, so cut or talk over the wait.
+3. Ask: "We have a surplus this month; how should we allocate it?" A plan appears and waits for approval.
 4. Approve as **viaan** (a dependent). The system refuses. Approve as **sayali**, which succeeds.
 5. Guardrails:
    - Upload `2026_09_somal_checking_tampered.pdf`: stored as unreconciled (balance_mismatch).
@@ -69,6 +69,15 @@ Start with a fresh restart of the app so the document list is clean. Pick the me
 6. Click **Verify chain** to show the audit trail is intact.
 
 Only the questions above were tried on live Gemma. Other questions (for example about the lease, the 2024 county bill or Somal's private note) are untested.
+
+## New UI panels (use these for the visual parts)
+
+- **Share my accounts.** No upload needed: two years of statements are already on file. Ask as somal "How much did Sayali's card spend at Safeway in September 2026?" (refused), then as sayali press Share with somal, and ask again as somal. Press Revoke and ask once more: refused again.
+- **Injection sample.** Upload `2026_09_somal_checking_injection.pdf` as somal. It reconciles; the Audit trail list shows an `index` event with an "instruction-like text flagged" tag, and nothing else happens. Do not upload it together with the tampered September sample on camera unless you want both rows in the list.
+- **Audit trail list.** Updates after every upload, question, approval and consent change; Verify chain adds the intact check.
+- **Evaluation results.** Press Run the checks: 13 plain-English gates with pass/fail, about 2 s, offline keyword router (it checks the guardrails, not model quality, and says so on the panel).
+- **Chips.** Tax, allocation, transfer refusal, groceries in 2025, the lease (rent and property tax), Viaan asking about Somal's account (refused out loud), the Sayali-card question (refused until Sayali shares) and the weather question are one click each.
+- Untested on live Gemma: the new chip questions. Rehearse them once to warm the LLM cache.
 
 ## Evaluation numbers to quote
 

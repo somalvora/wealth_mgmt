@@ -123,9 +123,9 @@ def test_a_long_statement_is_split_into_chunks_that_each_repeat_the_header():
 # --- seeding the demo ---------------------------------------------------------------------------------------------
 
 def test_seeding_fills_the_ledger_and_the_vector_index_but_not_the_document_list(seeded):
-    assert [d["name"] for d in seeded.documents] == ["2025_10_rental_checking.csv"]
+    assert [d["name"] for d in seeded.documents] == ["2025_10_rental_checking.csv", "2026_10_rental_checking.csv"]
     rows = seeded.conn.execute("SELECT reconciliation_status, count(*) FROM documents GROUP BY 1").fetchall()
-    assert rows == [("reconciled", 71)]
+    assert rows == [("reconciled", 72)]
     fh = seeded.retrieval.client.get_collection("hh_demo__financial_history")
     metas = fh.get(include=["metadatas"])["metadatas"]
     assert {m["statement_period"] for m in metas} >= {"2024-10", "2026-09", "2025-12"}
@@ -141,7 +141,7 @@ def test_a_reused_workdir_is_not_seeded_twice(tmp_path):
     again = DemoService(tmp_path)
     assert again.conn.execute("SELECT count(*) FROM documents").fetchone()[0] == count
     assert again.retrieval.client.get_collection("hh_demo__financial_history").count() == chunks
-    assert [d["name"] for d in again.documents] == ["2025_10_rental_checking.csv"]  # still no history in the list
+    assert [d["name"] for d in again.documents] == ["2025_10_rental_checking.csv", "2026_10_rental_checking.csv"]  # still no history in the list
     again.close()
 
 
