@@ -35,8 +35,9 @@ def upload(client, name, member="somal", content=None):
 def test_state_lists_members_samples_and_the_seeded_history(client):
     body = client.get("/api/state").json()
     assert {m["id"] for m in body["members"]} == {"somal", "sayali", "viaan"}
-    assert len(body["samples"]) == 6 and body["model"] == "offline playback"
-    assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv"]
+    assert len(body["samples"]) == 5 and body["model"] == "offline playback"
+    assert "2026_10_rental_checking.pdf" not in [x["name"] for x in body["samples"]]  # preloaded, not an upload step
+    assert [d["name"] for d in body["documents"]] == ["2025_10_rental_checking.csv", "2026_10_rental_checking.csv"]
 
 
 def test_the_page_is_served_and_never_writes_model_text_as_html(client):
@@ -54,9 +55,9 @@ def test_every_sample_pdf_is_deterministic_and_parses_or_fails_as_labelled():
 
 
 def test_a_good_pdf_reconciles_and_is_listed(client):
-    r = upload(client, "2026_10_rental_checking.pdf")
+    r = upload(client, "2026_10_somal_checking.pdf")
     assert r.status_code == 200 and r.json()["outcome"] == "reconciled"
-    assert "2026_10_rental_checking.pdf" in [d["name"] for d in client.get("/api/state").json()["documents"]]
+    assert "2026_10_somal_checking.pdf" in [d["name"] for d in client.get("/api/state").json()["documents"]]
 
 
 def test_a_tampered_closing_balance_is_stored_unreconciled(client):
@@ -123,8 +124,7 @@ def test_a_reused_workdir_starts_again_and_lists_its_documents(tmp_path):
 
 
 def test_allocation_plans_use_only_what_the_asker_may_read(client):
-    for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf"):
-        upload(client, name)
+    upload(client, "2026_10_somal_checking.pdf")
     body = client.post("/api/chat", json={"member": "viaan", "message": "We have a surplus this month; how should we allocate it?"}).json()
     assert not (body.get("approval") or {}).get("plan", {}).get("allocation_minor")  # a dependent sees none of Somal's balances
 
@@ -141,8 +141,7 @@ def test_sample_downloads(client):
     assert client.get("/api/samples/..%2Fpyproject.toml").status_code == 404
 
 
-def test_the_tax_question_is_answered_with_evidence_after_the_upload(client):
-    upload(client, "2026_10_rental_checking.pdf")
+def test_the_tax_question_is_answered_with_evidence_with_no_upload(client):
     body = client.post("/api/chat", json={"member": "somal", "message": TAX_QUESTION, "correlation_id": "corr_ui_t1"}).json()
     assert body["status"] in ("completed", "needs_review") and body["intent"] == "historical_comparison_and_tax_context"
     assert body["statements"] and all(s["evidence_ids"] for s in body["statements"])
@@ -163,7 +162,7 @@ def test_an_unrelated_question_is_out_of_scope_and_the_page_says_so(client):
 
 
 def test_allocation_waits_for_an_adult_and_a_dependent_cannot_approve(client):
-    for name in ("2026_10_rental_checking.pdf", "2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf"):
+    for name in ("2026_10_somal_checking.pdf", "2026_10_sayali_card.pdf"):
         upload(client, name, member="sayali" if "sayali" in name else "somal")
     body = client.post("/api/chat", json={"member": "somal", "message": "We have a surplus this month; how should we allocate it?"}).json()
     assert body["status"] == "awaiting_approval" and body["approval"]["plan"]
@@ -203,7 +202,6 @@ def test_with_two_years_of_history_an_allocation_is_planned_from_the_latest_stat
 
 
 def test_ledger_reads_in_the_trace_name_the_agent(client):
-    upload(client, "2026_10_rental_checking.pdf")
     body = client.post("/api/chat", json={"member": "somal", "message": TAX_QUESTION}).json()
     reads = [e for e in body["trace"] if e["action"] == "read"]
     assert reads and all(e["agent"] for e in reads)
@@ -249,7 +247,7 @@ def test_property_no_upload_is_ever_a_server_error(shared_service, content):
 def test_every_suggestion_chip_names_a_real_member(client):
     body = client.get("/api/state").json()
     members = {m["id"] for m in body["members"]}
-    assert len(body["suggestions"]) >= 9 and all(s["member"] in members for s in body["suggestions"])
+    assert len(body["suggestions"]) >= 8 and all(s["member"] in members for s in body["suggestions"])
 
 
 def test_the_injection_statement_reconciles_but_its_text_is_flagged_in_the_audit_list(client):
