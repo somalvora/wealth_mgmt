@@ -42,6 +42,7 @@ RULES = [
     CategoryRule("SAFEWAY", "Safeway", "groceries"),
     CategoryRule("STREAMCO", "StreamCo", "entertainment"),
     CategoryRule("CARD PAYMENT", "Card Payment", "transfer"),
+    CategoryRule("ACME BROKERAGE", "ACME Brokerage", "investment_transfer"),
 ]
 
 
