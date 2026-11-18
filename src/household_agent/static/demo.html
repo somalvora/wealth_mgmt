@@ -199,7 +199,6 @@ async function send(text) {
     b.statements.forEach(s => say('bot', s.text, m => m.appendChild(el('span', 'cite', `${s.agent} · evidence ${s.evidence_ids.join(', ')}`))));
     b.alerts.forEach(a => say('bot', a.text, m => m.classList.add('note')));
     b.questions.forEach(q => say('bot', q, m => m.classList.add('note')));
-    failed.forEach(a => say('bot', `${a.agent} failed: ${a.errors[0] || 'unknown'}`, m => m.classList.add('note')));
     if (b.approval) say('bot', b.approval.status === 'awaiting_approval' ? 'I drafted an allocation plan. It needs a household adult to approve it.'
       : 'No allocation plan was drafted.' + (b.approval.note ? ' ' + b.approval.note : ''), m => renderApproval(b.approval, m));
     if (!b.statements.length && !b.questions.length && !b.approval && b.status !== 'refused' && !b.alerts.length && !failed.length)

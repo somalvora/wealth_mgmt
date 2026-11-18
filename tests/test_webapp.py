@@ -359,3 +359,35 @@ def test_chips_and_sample_buttons_refresh_the_role_and_share_panel_when_they_pic
     page = client.get("/").text
     assert "pickMember(s.member)" in page and page.count("pickMember(s.member)") == 2
     assert "$('member').value = s.member" not in page  # setting .value does not fire onchange
+
+
+def test_a_money_movement_or_out_of_scope_request_that_names_a_member_is_not_given_a_privacy_refusal(client):
+    ask = lambda text: client.post("/api/chat", json={"member": "somal", "message": text}).json()  # noqa: E731
+    moved = ask("Transfer $5,000 from Sayali's card to the brokerage.")
+    assert moved["status"] == "refused"  # the money-movement refusal, not a privacy one
+    assert not any(e["decision"] == "deny" and e["resource"] == "account:acct_sayali_card" for e in moved["trace"])
+    weather = ask("What's the weather in Boston for Sayali?")
+    assert weather["status"] != "denied" and weather["intent"] == "out_of_scope"
+    assert ask("How much did Sayali's card spend at Safeway in September 2026?")["status"] == "denied"  # still refused
+
+
+def test_the_refusal_reads_consent_grants_under_the_service_lock(service, monkeypatch):
+    held = []
+    real = service._private_account_refusal
+    monkeypatch.setattr(service, "_private_account_refusal",
+                        lambda *a, **k: (held.append(service.lock._is_owned()), real(*a, **k))[1])  # noqa: SLF001
+    service.chat("somal", "How much did Sayali's card spend at Safeway in September 2026?")
+    assert held == [True]
+
+
+def test_an_agent_error_reaches_the_page_as_its_type_only(service, monkeypatch):
+    from household_agent import webapp
+    from household_agent.agents import AgentResult
+
+    failed = AgentResult(task_id="t", correlation_id="c", agent="ledger_analyst", status="failed", needs_review=True,
+                         errors=["ConnectionError: key=AIza-SECRET-123 refused", "get_transactions: 503 rows"])
+    monkeypatch.setattr(webapp.Supervisor, "run", lambda *a, **k: {
+        "status": "completed", "routing": {"intent": "historical_comparison"}, "results": [failed.model_dump()], "briefing": {}})
+    body = service.chat("somal", "How much did I spend on groceries in 2025?")
+    assert body["agents"][0]["errors"] == ["ConnectionError", "error"] and "SECRET" not in str(body)
+    assert "a.errors[0]" not in (STATIC / "demo.html").read_text()  # the briefing's failure note already says it, once
