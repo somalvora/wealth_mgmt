@@ -5,7 +5,8 @@ small tables (see ``LedgerStore.ingest_brokerage_month``) and its own calculatio
 ledger ones: the model names a function and an account and month, never a number; the figures are computed here in
 integer cents; every run is recorded with an input hash and an output hash so a claim can cite it.
 
-Everything is invented. Tickers, names and amounts are fictional and do not describe any real account.
+The account is invented: the quantities, prices and amounts are fictional and do not describe any real account. The
+tickers are real, widely held symbols chosen so a viewer can look them up; they were not taken from anyone's statements.
 """
 
 from dataclasses import dataclass
@@ -118,22 +119,22 @@ def _h(symbol: str, name: str, sector: str, kind: str, quantity: int, price: str
     return Holding(symbol, name, sector, kind, quantity, int(dollars) * 100 + int(cents.ljust(2, "0")))
 
 
-def _holdings(prices: tuple[str, ...], brdx_qty: int) -> tuple[Holding, ...]:
+def _holdings(prices: tuple[str, ...], voo_qty: int) -> tuple[Holding, ...]:
     """Eleven positions (four technology stocks, three other stocks, four funds) priced for one month. The monthly deposit
     buys more of the broad-market fund, so only its quantity changes from month to month."""
-    nvcp, orbt, hlxs, vrtd, hhlt, smte, pnbk, brdx, intx, divg, bndx = prices
+    nvda, msft, aapl, amd, jnj, xom, jpm, voo, vxus, schd, bnd = prices
     return (
-        _h("NVCP", "NovaChip Corp", "technology", "stock", 42, nvcp),
-        _h("ORBT", "Orbit Cloud Inc", "technology", "stock", 26, orbt),
-        _h("HLXS", "Helix Software", "technology", "stock", 34, hlxs),
-        _h("VRTD", "Vertex Devices", "technology", "stock", 18, vrtd),
-        _h("HHLT", "Harbor Health", "healthcare", "stock", 20, hhlt),
-        _h("SMTE", "Summit Energy", "energy", "stock", 28, smte),
-        _h("PNBK", "Pioneer Bank", "financials", "stock", 35, pnbk),
-        _h("BRDX", "Broad Market Index ETF", "broad_market", "etf", brdx_qty, brdx),
-        _h("INTX", "International Index ETF", "international", "etf", 40, intx),
-        _h("DIVG", "Dividend Growth ETF", "broad_market", "etf", 25, divg),
-        _h("BNDX", "Bond Index ETF", "bonds", "etf", 55, bndx),
+        _h("NVDA", "NVIDIA Corp", "technology", "stock", 42, nvda),
+        _h("MSFT", "Microsoft Corp", "technology", "stock", 26, msft),
+        _h("AAPL", "Apple Inc", "technology", "stock", 34, aapl),
+        _h("AMD", "Advanced Micro Devices", "technology", "stock", 18, amd),
+        _h("JNJ", "Johnson & Johnson", "healthcare", "stock", 20, jnj),
+        _h("XOM", "Exxon Mobil Corp", "energy", "stock", 28, xom),
+        _h("JPM", "JPMorgan Chase & Co", "financials", "stock", 35, jpm),
+        _h("VOO", "Vanguard S&P 500 ETF", "broad_market", "etf", voo_qty, voo),
+        _h("VXUS", "Vanguard Total International Stock ETF", "international", "etf", 40, vxus),
+        _h("SCHD", "Schwab US Dividend Equity ETF", "broad_market", "etf", 25, schd),
+        _h("BND", "Vanguard Total Bond Market ETF", "bonds", "etf", 55, bnd),
     )
 
 
