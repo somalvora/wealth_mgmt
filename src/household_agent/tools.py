@@ -21,7 +21,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from household_agent.authz import Actor, AuthorizationError
-from household_agent.calc_runner import REGISTRY, CalculationRunner, IneligibleInputError
+from household_agent.brokerage import BROKERAGE_CALCS
+from household_agent.calc_runner import REGISTRY, CalculationRunner, IneligibleInputError, record_run
 from household_agent.categorize import Categorizer
 from household_agent.ingest import StatementParseError
 from household_agent.ledger import DuplicateDocumentError, LedgerStore
@@ -29,7 +30,8 @@ from household_agent.models import Action, Transaction
 from household_agent.pipeline import ingest_statement
 from household_finance import CalculationError
 
-TOOL_NAMES = ("list_accounts", "query_ledger", "run_calculation", "ingest_statement")
+TOOL_NAMES = ("list_accounts", "query_ledger", "run_calculation", "ingest_statement",
+              "brokerage_performance", "brokerage_concentration")
 
 
 class ToolBudgetExceeded(RuntimeError):
@@ -219,6 +221,28 @@ class ToolSession:
                     "provisional": r.provisional, "input_ids": r.input_ids,
                     **_left_out_view([self._query_notes[q] for q in sorted(
                         {q for i in r.input_ids for q in self._seen_in.get(i, ())})])}
+        return self._guard(run)
+
+    def brokerage_performance(self, account_id: str, month: str | None = None) -> dict[str, Any]:
+        """Opening, closing, deposits and market effect for a brokerage account's monthly statement (latest by default)."""
+        return self._brokerage_calc("brokerage_performance", account_id, month)
+
+    def brokerage_concentration(self, account_id: str, month: str | None = None) -> dict[str, Any]:
+        """Largest position, top-four share, technology share and limit breaches for a brokerage account's statement."""
+        return self._brokerage_calc("brokerage_concentration", account_id, month)
+
+    def _brokerage_calc(self, fn: str, account_id: str, month: str | None) -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            statement = self.store.brokerage_month(
+                self.actor, self.purpose, self.correlation_id, account_id, month, at=self.clock(),
+                acting_agent=self.acting_agent)
+            r = record_run(self.store, fn, BROKERAGE_CALCS[fn](statement), input_ids=[statement.statement_id],
+                           params={"account_id": account_id, "month": statement.period}, actor_id=self.actor.member_id,
+                           household_id=self.actor.household_id, correlation_id=self.correlation_id,
+                           acting_agent=self.acting_agent)
+            return {"run_id": r.run_id, "fn": r.fn, "output": r.output, "input_hash": r.input_hash,
+                    "output_hash": r.output_hash, "library_version": r.library_version, "input_ids": r.input_ids,
+                    "account_id": account_id}
         return self._guard(run)
 
     def ingest_statement(self, csv_text: str, source_name: str) -> dict[str, Any]:

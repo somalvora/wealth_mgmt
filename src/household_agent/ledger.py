@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime
 
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor, AuthorizationError, Authorizer, Decision
+from household_agent.brokerage import BrokerageMonth, BrokerageStatementError, Holding
 from household_agent.categorize import Categorized
 from household_agent.ingest import ParsedStatement
 from household_agent.models import Action, ReconciliationStatus, Transaction
@@ -89,9 +90,21 @@ CREATE TABLE IF NOT EXISTS calculation_runs (
     correlation_id TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS brokerage_statements (
+    account_id TEXT NOT NULL,
+    period TEXT NOT NULL,
+    opening_minor INTEGER NOT NULL,
+    deposits_minor INTEGER NOT NULL,
+    dividends_minor INTEGER NOT NULL,
+    cash_minor INTEGER NOT NULL,
+    holdings_json TEXT NOT NULL,
+    ingested_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, period)
+);
 """
 
-_APPEND_ONLY_TABLES = ("documents", "statement_balances", "raw_rows", "transactions", "calculation_runs")
+_APPEND_ONLY_TABLES = ("documents", "statement_balances", "raw_rows", "transactions", "calculation_runs",
+                       "brokerage_statements")
 
 _TXN_COLUMNS = tuple(Transaction.model_fields)
 
@@ -267,6 +280,58 @@ class LedgerStore:
                     row["correlation_id"], row["created_at"],
                 ),
             )
+
+    # --- brokerage statements -------------------------------------------------------
+
+    def ingest_brokerage_month(
+        self, actor: Actor, purpose: str, correlation_id: str, month: BrokerageMonth, at: datetime | None = None,
+    ) -> None:
+        """Store one monthly brokerage statement. The owner may upload to the account; a month already on file is a
+        duplicate, and a month that does not open where the previous one closed is refused (a gap or an edited figure)."""
+        at = at or datetime.now(UTC)
+        self._require(actor, month.account_id, Action.UPLOAD, purpose, correlation_id, at)
+        account = self.authorizer.account(month.account_id)
+        assert account is not None  # authorize() denies unknown accounts
+        if account.kind != "brokerage":
+            raise BrokerageStatementError(f"{month.account_id} is a {account.kind} account, not a brokerage account")
+        with self.audit.lock:
+            if self.conn.execute("SELECT 1 FROM brokerage_statements WHERE account_id = ? AND period = ?",
+                                 (month.account_id, month.period)).fetchone():
+                raise DuplicateDocumentError(f"{month.statement_id} is already on file")
+            previous = self.conn.execute(
+                "SELECT opening_minor, deposits_minor, dividends_minor, cash_minor, holdings_json FROM brokerage_statements "
+                "WHERE account_id = ? AND period < ? ORDER BY period DESC LIMIT 1", (month.account_id, month.period)).fetchone()
+            if previous is not None:
+                prior_close = previous[3] + sum(h["quantity"] * h["price_minor"] for h in json.loads(previous[4]))
+                if prior_close != month.opening_minor:
+                    raise BrokerageStatementError(
+                        f"{month.statement_id} opens at {month.opening_minor} but the previous month closed at {prior_close}")
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO brokerage_statements VALUES (?,?,?,?,?,?,?,?)",
+                    (month.account_id, month.period, month.opening_minor, month.deposits_minor, month.dividends_minor,
+                     month.cash_minor, json.dumps([asdict(h) for h in month.holdings]), at.isoformat()))
+            self.audit.append(
+                correlation_id=correlation_id, actor_id=actor.member_id, household_id=actor.household_id,
+                action="ingest_brokerage_statement", purpose=purpose, resource=f"account:{month.account_id}",
+                decision="info", details={"statement_id": month.statement_id, "closing_minor": month.closing_minor}, at=at)
+
+    @_locked
+    def brokerage_month(
+        self, actor: Actor, purpose: str, correlation_id: str, account_id: str, period: str | None = None,
+        at: datetime | None = None, acting_agent: str | None = None,
+    ) -> BrokerageMonth:
+        """The statement for ``period`` (the latest on file when ``None``), after the read is authorized and audited."""
+        at = at or datetime.now(UTC)
+        self._require(actor, account_id, Action.READ, purpose, correlation_id, at, acting_agent)
+        sql = ("SELECT account_id, period, opening_minor, deposits_minor, dividends_minor, cash_minor, holdings_json "
+               "FROM brokerage_statements WHERE account_id = ?")
+        row = (self.conn.execute(sql + " AND period = ?", (account_id, period)).fetchone() if period else
+               self.conn.execute(sql + " ORDER BY period DESC LIMIT 1", (account_id,)).fetchone())
+        if row is None:
+            raise KeyError(f"no brokerage statement on file for {account_id}" + (f" for {period}" if period else ""))
+        return BrokerageMonth(row[0], row[1], row[2], row[3], row[4], row[5],
+                              tuple(Holding(**h) for h in json.loads(row[6])))
 
     # --- reads ------------------------------------------------------------------
 

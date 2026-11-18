@@ -117,6 +117,8 @@ def derive_planning_inputs(
     excluded: dict[str, str] = {}
     readable = []
     for account in store.authorizer.accounts(actor.household_id):
+        if account.kind == "brokerage":
+            continue  # invested money, not cash: it has positions, not a bank statement, and is not counted as liquid
         if store.authorizer.authorize(actor, account.account_id, Action.READ, PURPOSE, as_of):
             readable.append(account)
         else:
