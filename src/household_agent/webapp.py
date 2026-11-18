@@ -357,14 +357,23 @@ class DemoService:
                 "reason": "only a household admin or adult member may approve" if refused else "",
                 "plan": after.get("plan"), "decision": after.get("decision")}
 
+    @staticmethod
+    def _resource(e: dict[str, Any]) -> str | None:
+        """What the event touched. A retrieve row has no resource, so a question searched twice or three times would show
+        identical rows; give it the search text instead."""
+        if e.get("resource") or e["action"] != Action.RETRIEVE.value:
+            return e.get("resource")
+        query = str(json.loads(e.get("details_json") or "{}").get("query") or "").strip()
+        return f'"{query[:70]}"' if query else None
+
     def trace(self, corr: str) -> list[dict[str, Any]]:
         return [{"actor": e["actor_id"], "agent": e["acting_agent"], "action": e["action"], "decision": e["decision"],
-                 "resource": e.get("resource"), "reason": (e.get("reason") or "")[:200]} for e in self.store.audit.events(corr)]
+                 "resource": self._resource(e), "reason": (e.get("reason") or "")[:200]} for e in self.store.audit.events(corr)]
 
     def audit_status(self, recent: int = 15) -> dict[str, Any]:
         """Chain check plus the latest events, newest first. ``flagged`` marks instruction-like text found in a source."""
         events = [{"seq": e["seq"], "actor": e["actor_id"], "agent": e["acting_agent"], "action": e["action"],
-                   "decision": e["decision"], "resource": e.get("resource"), "reason": (e.get("reason") or "")[:160],
+                   "decision": e["decision"], "resource": self._resource(e), "reason": (e.get("reason") or "")[:160],
                    "flagged": bool(json.loads(e.get("details_json") or "{}").get("instruction_like_chunks"))}
                   for e in self.store.audit.events()[-recent:]][::-1]
         try:

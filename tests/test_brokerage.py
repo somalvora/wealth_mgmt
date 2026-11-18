@@ -88,17 +88,17 @@ def test_concentration_matches_an_independent_recomputation():
 
 def test_october_concentration_story():
     out = concentration(OCT)
-    assert out["largest_symbol"] == "NVCP" and out["largest_share_pct"] == "23.1"
-    assert out["stocks_over_single_stock_limit"] == ["NVCP"] and out["technology_share_pct"] == "46.2"
+    assert out["largest_symbol"] == "NVDA" and out["largest_share_pct"] == "23.1"
+    assert out["stocks_over_single_stock_limit"] == ["NVDA"] and out["technology_share_pct"] == "46.2"
     assert out["technology_over_limit"] is False and out["top4_share_pct"] == "54.9"
     assert concentration(SEP)["technology_over_limit"] is True  # September was over the sector limit
 
 
 def test_funds_are_exempt_from_the_single_stock_limit():
-    big_fund = replace(OCT, holdings=tuple(replace(h, quantity=h.quantity * 20) if h.symbol == "BRDX" else h
+    big_fund = replace(OCT, holdings=tuple(replace(h, quantity=h.quantity * 20) if h.symbol == "VOO" else h
                                            for h in OCT.holdings))
-    assert concentration(big_fund)["largest_symbol"] == "BRDX"
-    assert "BRDX" not in concentration(big_fund)["stocks_over_single_stock_limit"]
+    assert concentration(big_fund)["largest_symbol"] == "VOO"
+    assert "VOO" not in concentration(big_fund)["stocks_over_single_stock_limit"]
 
 
 def test_the_policy_document_states_the_same_limits_the_calculation_uses():
