@@ -254,6 +254,14 @@ def test_policy_query_refinement_limit(retrieval):
     assert any("query refinements" in e for e in r.errors)
 
 
+def test_an_exact_repeat_of_a_search_is_answered_from_the_first_and_not_run_again(retrieval):
+    steps = [call("retrieve_verified", query="Unit B rent"), call("retrieve_verified", query="  unit b  RENT "),
+             call("retrieve_verified", query="Unit B rent"), call("retrieve_verified", query="Unit B rent"), final()]
+    r = PolicyCompliance(Scripted(steps=steps), retrieval, SOMAL, clock=lambda: DEMO_AS_OF)(assignment("policy_compliance"))
+    searches = [e for e in retrieval.audit.events() if e["action"] == "retrieve"]
+    assert len(searches) == 1 and not any("query refinements" in e for e in r.errors)
+
+
 def test_policy_model_is_told_its_search_limit(retrieval):
     seen = []
     PolicyCompliance(Scripted(steps=[lambda msgs: seen.append(msgs) or final()]), retrieval, SOMAL,
