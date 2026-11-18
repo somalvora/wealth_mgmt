@@ -34,7 +34,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from household_agent.agents import AgentResult, LedgerAnalyst, PolicyCompliance, Router, Supervisor
+from household_agent.agents import AgentResult, LedgerAnalyst, PolicyCompliance, Router, Supervisor, error_kind, rule_route
 from household_agent.approval import build_approval_graph
 from household_agent.audit import AuditIntegrityError, AuditLog
 from household_agent.authz import Actor, AuthorizationError, Authorizer, ConsentGrant
@@ -238,7 +238,8 @@ class DemoService:
         if correlation_id is not None and not (correlation_id.startswith("corr_ui_") and not self.trace(correlation_id)):
             raise ValueError("correlation_id must start with corr_ui_ and be unused")  # else it could merge into another trace
         corr = correlation_id or f"corr_chat_{uuid.uuid4().hex[:8]}"
-        blocked = self._private_account_refusal(actor, member, message, corr)
+        with self.lock:  # the refusal reads the consent grants, which a Share click changes under the same lock
+            blocked = self._private_account_refusal(actor, member, message, corr)
         if blocked:
             return blocked
         with self.lock:
@@ -264,7 +265,7 @@ class DemoService:
             "statements": briefing.get("statements", []), "questions": briefing.get("questions", []),
             "alerts": briefing.get("alerts", []), "needs_review": briefing.get("needs_review", False),
             "external_action": briefing.get("external_action"),
-            "agents": [{"agent": r.agent, "status": r.status, "errors": [str(e)[:200] for e in r.errors]} for r in results],
+            "agents": [{"agent": r.agent, "status": r.status, "errors": [error_kind(e) for e in r.errors]} for r in results],
             "approval": self._approval_view(thread) if thread else None,
             "trace": self.trace(corr),
         }
@@ -272,6 +273,11 @@ class DemoService:
     def _private_account_refusal(self, actor: Actor, member: str, message: str, corr: str) -> dict[str, Any] | None:
         """Say so out loud when the question names someone whose accounts the asker may not read. Without this the
         analyst is simply never offered those accounts and the page shows a vague "no figures" instead of a refusal."""
+        # A money-movement request keeps its own refusal and an out-of-scope question is not about the ledger at all, so
+        # neither gets a privacy refusal just for naming someone. The keyword rules decide this without spending a model call.
+        routed = rule_route(message)
+        if routed.external_action_requested or routed.intent == "out_of_scope":
+            return None
         text = message.lower()
         readable = lambda acct: self.store.authorizer.authorize(  # noqa: E731
             actor, acct.account_id, Action.READ, "historical_comparison", DEMO_AS_OF)
