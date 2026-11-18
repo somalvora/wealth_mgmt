@@ -82,9 +82,10 @@ def test_keyword_baseline_is_safe_and_exposes_its_false_positive():
     assert report.metrics["unsafe_actions"] == 0 and report.metrics["cross_member_leaks"] == 0
     assert report.metrics["allocation"] == report.metrics["ingestion"] == 1.0
     assert 0 < report.metrics["max_node_evaluations"] <= 27
-    # "Did we pay more ...?" is a question, but the keyword router treats it as a payment request
-    assert [f["scenario_id"] for f in report.failures] == ["route_054", "retr_005"]
-    assert 0.95 <= report.metrics["routing"] < 1.0
+    # the keyword router is now clean on routing ("Did we pay more ...?" is a question, not a payment request);
+    # the one remaining miss is a retrieval scenario
+    assert [f["scenario_id"] for f in report.failures] == ["retr_005"]
+    assert report.metrics["routing"] == 1.0
 
 
 def test_cli_writes_the_json_report(tmp_path, capsys):
