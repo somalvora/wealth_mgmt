@@ -717,7 +717,14 @@ def flagged_evidence_ids(results: list[Mapping[str, Any]], flagged_docs: set[str
     return ids
 
 
-_MODEL_BUSY = re.compile(r"\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|RateLimit|high demand", re.IGNORECASE)
+_MODEL_BUSY = re.compile(r"RESOURCE_EXHAUSTED|UNAVAILABLE|RateLimit|Too Many Requests|high demand", re.IGNORECASE)
+_ERROR_TYPE = re.compile(r"[A-Z]\w*(?:Error|Exception|Timeout|Warning)")  # a Python exception class, never a tool name
+
+
+def error_kind(error: str) -> str:
+    """The exception type of an error string and nothing else: its message can echo a key or a request."""
+    head = error.split(":", 1)[0].strip()
+    return head if _ERROR_TYPE.fullmatch(head) else "error"
 
 
 def failure_notes(results: list[AgentResult]) -> list[str]:
@@ -732,7 +739,7 @@ def failure_notes(results: list[AgentResult]) -> list[str]:
             notes.append(f"The model service is busy or over its quota, so the {who} could not answer and nothing was "
                          "verified. Wait a minute and ask again, or run with another model.")
         else:
-            kind = r.errors[0].split(":", 1)[0] if r.errors else "unknown error"
+            kind = error_kind(r.errors[0]) if r.errors else "unknown error"
             notes.append(f"The {who} could not finish ({kind}), so nothing from it was verified. The trace has the details.")
     return notes
 
