@@ -2,10 +2,10 @@
 
 Updated 2026-11-18 (night). Worktree: `/Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions`.
 Repo `somalvora/wealth_mgmt` (PUBLIC: synthetic data only, never real balances, account numbers or PDFs).
-**Merged into `main`:** #20, #21, #22, #23 (brokerage chips), #25 (real tickers, document month labels, retrieve rows show the
-search text), #26 (repeat searches reuse the first result, brokerage answer leads with the result).
-**Open, owner merges:** #27 (eval gate `policy_search_count`, branch `eval-policy-search-count`) and #28 (router fix for route_054,
-branch `router-past-pay-question`). They merge cleanly together; suite and offline eval pass on the combination.
+**Merged into `main` (head 4a702fb):** #20, #21, #22, #23 (brokerage chips), #25 (real tickers, document month labels, retrieve rows
+show the search text), #26 (repeat searches reuse the first result, brokerage answer leads with the result), #27 (eval gate
+`policy_search_count`), #28 (router fix for route_054). Suite passes on main after both merges.
+**Open:** #29 (this handoff, docs only, draft). Branch `eval-brokerage` was created off `origin/main` with no changes yet.
 Titles use the placeholder `@W-XXXXXXXX : ...` (no work item exists, owner said "No WI"). Suite passes.
 GitHub: the active `gh` account was the EMU one; I switched to `somalvora` only for push/PR and switched back. Plain `git push`
 cannot authenticate in this shell; use `git -c "credential.helper=!gh auth git-credential" push -u origin <branch>` after
@@ -41,10 +41,9 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - Custom, offline, deterministic harness: `python -m household_agent.evals` (`evals.py`, `eval_quality.py`), seeded synthetic
   scenarios, pass/fail gates with fixed targets and oracles independent of the code under test. No LangSmith, Langfuse or MLflow
   (`langsmith` is only a transitive dependency of `langchain-core`; no tracing env vars). The owner decided to skip LangSmith.
-- On main today: 13 gates, 321 scenarios, routing_accuracy 0.9818 (keyword router; the one miss is `route_054`), retrieval_recall_at_5
-  0.9444 (`retr_005` water_heater_invoice misses on the offline hash embeddings; expected).
-- With #27 and #28 merged: **14 gates, 348 scenarios** (new area `search_count`, 27 scenarios, gate `policy_search_count`, EVAL_VERSION
-  `evals_0.3`), routing_accuracy 1.0, `unsafe_actions` 0, all 14 adversarial scenarios still refuse.
+- On main today (#27 and #28 merged): **14 gates, 348 scenarios** (area `search_count`, 27 scenarios, gate `policy_search_count`,
+  EVAL_VERSION `evals_0.3`), routing_accuracy 1.0 (keyword router), `unsafe_actions` 0, all 14 adversarial scenarios refuse,
+  retrieval_recall_at_5 0.9444 (`retr_005` water_heater_invoice misses on the offline hash embeddings; expected).
 - **Gaps:** (1) no eval scenarios for the brokerage tools; (2) the harness has only ever run on the offline keyword router, never a
   live model, so 0.98/1.0 is the keyword baseline, not Gemma; (3) ledger/policy answer quality is only tested with scripted models;
   (4) membership inference is listed as not covered; (5) old ideas: more adversarial scenarios, indirect injection, citation cases,
@@ -68,8 +67,8 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - Do not spend Gemini quota without asking.
 
 ## Open items (in order)
-1. Owner merges #27 and #28. Then `git fetch`, branch from `origin/main`, run the suite (should pass, 14 gates).
-2. **Brokerage eval scenarios** (owner approved, not started; start after #27 merges because it edits `evals.py` and the counts).
+1. DONE: #27 and #28 merged; suite verified passing on main (4a702fb).
+2. **Brokerage eval scenarios** (owner approved, not started; branch `eval-brokerage` exists off origin/main, empty).
    Model on the existing `calculation` area: generate about 30 random portfolios/months and check against an independent oracle
    (no import of `brokerage.py` logic): (a) opening + deposits + dividends + market effect = closing to the cent, percent change,
    opening = previous closing, deposits equal the `ACME BROKERAGE TRANSFER` ledger rows; (b) concentration shares recomputed
@@ -112,15 +111,15 @@ main: an old server still shows old figures.
 ```
 Continue the Household Wealth Agent work (demo UI and evals). Read HANDOFF.md first, in
 /Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions
-(merged: #20-#23, #25, #26; open: #27 eval gate policy_search_count and #28 router fix route_054; GitHub push needs
+(merged: #20-#23, #25-#28, main head 4a702fb, 14 gates / 348 scenarios; #29 is the handoff PR; GitHub push needs
 `gh auth switch --hostname github.com --user somalvora` first and a switch back to somal-vora_sfemu after, see HANDOFF.md).
 
 Goal: a video recorded by clicking only the suggestion chips, plus a stronger eval harness.
 
 Do, in order:
-1. git fetch; check whether #27 and #28 are merged; branch new work from origin/main (never from a merged branch); run
-   `uv run python -m pytest tests -q` and `uv run python -m household_agent.evals` (expect 14 gates once both are merged).
-2. If #27 is merged: add brokerage eval scenarios (performance vs an independent oracle, concentration vs the written policy), per
+1. git fetch; branch new work from origin/main (use the existing empty `eval-brokerage` if still unchanged; never branch from a
+   merged branch); run `uv run python -m pytest tests -q` and `uv run python -m household_agent.evals` (expect 14 gates).
+2. Add brokerage eval scenarios (performance vs an independent oracle, concentration vs the written policy), per
    "Open items" 2 in HANDOFF.md. Use one subagent in an isolated worktree if useful. Keep titles `@W-XXXXXXXX : ...`.
 3. Then build the resumable live routing eval (`--resume`), per "Open items" 3. Never count fallbacks as model answers.
 4. Refresh HANDOFF.md after each merge.
