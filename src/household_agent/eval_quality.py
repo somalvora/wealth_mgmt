@@ -10,6 +10,9 @@ labeled data and scorers so each oracle stays independent of the code it checks:
 - retrieval:    labeled queries over synthetic policy sources; document-level recall@5,
                 leaks judged by account ownership, and citation precision of ``validate_claims``
                 on correct, wrong-source and altered-number claims
+- search_count: a scripted model drives PolicyCompliance through repeated, distinct and over-budget
+                queries; the ``retrieve`` audit rows must show repeats collapsed and at most
+                ``MAX_QUERY_REFINEMENTS + 1`` real searches
 - privacy:      canary strings planted in one member's private statement and note must never
                 reach another member, the dependent or the delegate (briefing, retrieval, tools,
                 and every prompt a specialist model is shown)
@@ -22,13 +25,23 @@ import random
 import re
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
+from langchain_core.outputs import ChatGeneration, ChatResult
 
-from household_agent.agents import LedgerAnalyst, PolicyCompliance, Router, Supervisor
+from household_agent.agents import (
+    MAX_QUERY_REFINEMENTS,
+    LedgerAnalyst,
+    PolicyCompliance,
+    Router,
+    Supervisor,
+    TaskAssignment,
+)
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor, Authorizer
 from household_agent.briefing import draft_monthly_briefing, render_markdown
@@ -347,6 +360,89 @@ class RetrievalWorld:
         supported = [v["verdict"] == "supported" for v in verdicts]
         return {"found": sorted(set(visible) & set(top)), "visible": visible, "leaked": leaked,
                 "claims": [(ok, want) for ok, (_, _, want) in zip(supported, cases, strict=True)]}
+
+
+# --- policy-agent search count ---------------------------------------------------------------
+
+# Three distinct searches per set (one per topic); the scripted model replays them in the patterns below.
+SEARCH_SETS = [
+    ("Monthly HOA dues for Unit B", "annual insurance premium for Unit B", "replaced water heater depreciation"),
+    ("Unit B monthly rent in the lease", "property tax deductible rental expense", "city rent increase limit"),
+    ("HOA special assessment roof repairs", "landlord insurance coverage fire water", "rental building depreciation years"),
+]
+_BUDGET_EXTRA = "Somal property tax payment plan"  # a 4th and 5th distinct query that must never run
+# kind -> (pattern over indices into the set plus extras 3 and 4, real searches expected, budget error expected)
+SEARCH_PATTERNS: dict[str, tuple[tuple[int, ...], int, bool]] = {
+    "exact_repeat_x3": ((0, 0, 0), 1, False),
+    "exact_repeat_x5": ((0, 0, 0, 0, 0), 1, False),
+    "case_and_spacing_variants": ((0, 0, 0, 0), 1, False),  # rendered below with changed case and spacing
+    "interleaved_repeats": ((0, 1, 0, 1), 2, False),
+    "three_distinct": ((0, 1, 2), 3, False),
+    "distinct_with_repeats": ((0, 1, 2, 0, 1), 3, False),
+    "four_distinct_over_budget": ((0, 1, 2, 3), MAX_QUERY_REFINEMENTS + 1, True),
+    "five_distinct_over_budget": ((0, 1, 2, 3, 4), MAX_QUERY_REFINEMENTS + 1, True),
+    "over_budget_then_repeat": ((0, 1, 2, 3, 0), MAX_QUERY_REFINEMENTS + 1, True),
+}
+
+
+def _vary(query: str, k: int) -> str:
+    return [query, query.upper(), f"  {query.lower()}  ", " ".join(query.split()).title().replace(" ", "  ")][k % 4]
+
+
+def search_count_cases() -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    out = []
+    for kind, (pattern, rows, budget) in SEARCH_PATTERNS.items():
+        for s, base in enumerate(SEARCH_SETS):
+            pool = [*base, _BUDGET_EXTRA, f"{_BUDGET_EXTRA} again"]
+            queries = [_vary(pool[i], n) if kind == "case_and_spacing_variants" else pool[i]
+                       for n, i in enumerate(pattern)]
+            out.append(({"kind": kind, "queries": queries}, {"rows": rows, "budget_error": budget}))
+    return out
+
+
+class SearchScript(BaseChatModel):
+    """A model that issues exactly these ``retrieve_verified`` queries, one per turn, then answers with no claims."""
+
+    queries: list[str]
+    i: int = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if self.i < len(self.queries):
+            msg = _call("retrieve_verified", query=self.queries[self.i]).model_copy(update={"id": None})
+            msg.tool_calls[0]["id"] = f"search_{self.i}"
+        else:
+            msg = _final()
+        self.i += 1
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "search_script"
+
+
+def search_count_problems(service: RetrievalService, payload: dict[str, Any], expected: dict[str, Any], corr: str,
+                          agent_factory: Callable[..., Any] | None = None) -> list[str]:
+    """Drive the policy agent with a scripted model and count the ``retrieve`` audit rows it caused.
+
+    Repeats of one query (ignoring case and spacing) must collapse to a single row, the agent may never
+    run more than ``MAX_QUERY_REFINEMENTS + 1`` searches, and going past that must report the budget error
+    instead of searching.
+    """
+    model = SearchScript(queries=payload["queries"])
+    agent = (agent_factory or PolicyCompliance)(model, service, SOMAL, clock=lambda: DEMO_AS_OF)
+    result = agent(TaskAssignment(task_id=f"task_{corr}", correlation_id=corr, assigned_agent="policy_compliance",
+                                  purpose="tax_preparation", authorized_scope={"household_id": SOMAL.household_id},
+                                  task="search_count_eval"))
+    rows = sum(e["action"] == "retrieve" for e in service.audit.events(corr))
+    problems = []
+    if rows != expected["rows"]:
+        problems.append(f"{rows} retrieve rows, want {expected['rows']}")
+    if rows > MAX_QUERY_REFINEMENTS + 1:
+        problems.append(f"{rows} searches is over the limit of {MAX_QUERY_REFINEMENTS + 1}")
+    reported = any("budget_exhausted" in e for e in result.errors)
+    if reported != expected["budget_error"]:
+        problems.append("budget error " + ("missing" if expected["budget_error"] else "reported without being over budget"))
+    return problems
 
 
 # --- privacy canaries ------------------------------------------------------------------------

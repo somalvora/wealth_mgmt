@@ -11,7 +11,7 @@ The design is the single source of truth:
 |---|---|---|
 | 1 | Steps 1–6 below | **Done** |
 | 2 | LangGraph supervisor + Ledger Analyst + Policy & Compliance agents, ChromaDB retrieval, local MCP server, Ollama models | **In progress**: model config, consent, approval, tools, MCP server, retrieval, agents, ledger-derived planner inputs, model planner personas, monthly briefing, eval harness and §12 vertical slice done |
-| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **In progress**: 321-scenario eval harness scores 13 gates (all design §2 metrics except membership inference) and the draft monthly briefing is in; first real-model numbers are in (routing ~0.98 on Gemma; slice 14/14 on Gemma and Qwen2.5-3B); real-model allocation scenarios and hardening remain |
+| 3 | Evaluation harness (≥200 scenarios), briefing generation, hardening | **In progress**: 348-scenario eval harness scores 14 gates (all design §2 metrics except membership inference) and the draft monthly briefing is in; first real-model numbers are in (routing ~0.98 on Gemma; slice 14/14 on Gemma and Qwen2.5-3B); real-model allocation scenarios and hardening remain |
 
 What's in Phase 1:
 
@@ -95,7 +95,7 @@ What's in Phase 2 so far:
       Each alert is a material event with the run ID and the transaction IDs as evidence, worded as "please review", never as a fraud finding.
     - **Privacy.** Accounts the member can't read appear only as a count ("2 household account(s) are not shared with you").
     - **Draft only.** `draft` is always `true` and `external_action` is always `"none"`. The last item is always the disclaimer, and composing the briefing is audited.
-11. **Evaluation harness** (`evals.py`, `eval_quality.py`). `generate_scenarios(seed)` builds a seeded, synthetic held-out set of 321 scenarios. `evaluate` runs them through the real components and scores 13 design §2 gates.
+11. **Evaluation harness** (`evals.py`, `eval_quality.py`). `generate_scenarios(seed)` builds a seeded, synthetic held-out set of 348 scenarios. `evaluate` runs them through the real components and scores 14 design §2 gates.
     - **Routing (55 scenarios).** Intent, dispatched agents and the approval route. Gates: accuracy ≥ 0.95, schema validity ≥ 0.99, approval gating = 100%. A keyword fallback (`rules_fallback`) counts as an invalid model reply.
     - **Adversarial (14).** Pay, transfer, wire and prompt-injection requests run through `Supervisor.run` and must end `refused`. Gate: 0 unsafe actions.
     - **Authorization (72).** Every actor × account × purpose combination, with and without the CPA's two-owner consent. Gate: 0 cross-member leaks (retrieval leaks count here too).
@@ -207,7 +207,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   llm_planner.py           Model-driven persona thoughts (validated, template fallback) and advisory critic
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   briefing.py              Draft-only seven-section monthly briefing (deterministic, evidence-cited) + Markdown
-  evals.py                 Seeded 321-scenario eval harness and 13 §2 gates; `python -m household_agent.evals`
+  evals.py                 Seeded 348-scenario eval harness and 14 gates; `python -m household_agent.evals`
   eval_quality.py          Calculation, anomaly, retrieval/citation and privacy-canary eval data and scorers
   vertical_slice.py        §12 exit-criteria run (3 agents, guardrails, restart resume); `python -m household_agent.vertical_slice`
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)

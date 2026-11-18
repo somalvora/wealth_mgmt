@@ -7,6 +7,7 @@ from hypothesis import strategies as st
 
 import household_finance as hf
 from household_agent import eval_quality as quality
+from household_agent.agents import MAX_QUERY_REFINEMENTS, AgentResult
 from household_agent.authz import Authorizer, Decision
 from household_agent.calc_runner import REGISTRY
 from household_agent.evals import evaluate, generate_scenarios
@@ -109,7 +110,89 @@ def test_word_overlap_keeps_a_paraphrase_but_drops_an_unrelated_source():
     assert wrong["verdict"] == "rephrase_as_question" and "do not say" in wrong["reason"]
 
 
+# --- policy-agent search count ---------------------------------------------------------
+
+class _NoDedupe:
+    """A broken policy agent: runs every query the model asks for, repeats and over-budget ones included."""
+
+    def __init__(self, model, retrieval, actor, clock):
+        self.model, self.retrieval, self.actor, self.clock = model, retrieval, actor, clock
+
+    def __call__(self, a):
+        for q in self.model.queries:
+            self.retrieval.retrieve_verified(self.actor, a.purpose, q, correlation_id=a.correlation_id, at=self.clock())
+        return AgentResult(task_id=a.task_id, correlation_id=a.correlation_id, agent="policy_compliance",
+                           status="completed")
+
+
+def _search_cases():
+    return _only("search_count")
+
+
+def test_search_count_scenarios_cover_repeats_distinct_and_over_budget():
+    kinds = {s.payload["kind"] for s in _search_cases()}
+    assert kinds == set(quality.SEARCH_PATTERNS) and len(_search_cases()) == 27
+    by_kind = {s.payload["kind"]: s for s in _search_cases()}
+    assert by_kind["exact_repeat_x3"].expected == {"rows": 1, "budget_error": False}
+    assert by_kind["three_distinct"].expected == {"rows": MAX_QUERY_REFINEMENTS + 1, "budget_error": False}
+    assert by_kind["four_distinct_over_budget"].expected == {"rows": MAX_QUERY_REFINEMENTS + 1, "budget_error": True}
+    variants = by_kind["case_and_spacing_variants"].payload["queries"]
+    assert len(set(variants)) > 1 and len({" ".join(q.lower().split()) for q in variants}) == 1
+
+
+def test_search_count_area_passes_with_the_real_policy_agent():
+    report = evaluate(_search_cases())
+    gate = _gate(report, "policy_search_count")
+    assert report.passed and gate.passed and gate.value == 0 and gate.target == "== 0"
+    assert report.counts == {"search_count": 27} and report.metrics["search_count"] == 1.0
+    assert not report.failures
+
+
+def test_search_count_rows_are_counted_per_correlation_id():
+    world = quality.RetrievalWorld.build()
+    try:
+        s = next(s for s in _search_cases() if s.payload["kind"] == "over_budget_then_repeat")
+        assert quality.search_count_problems(world.service, s.payload, s.expected, "corr_a") == []
+        assert quality.search_count_problems(world.service, s.payload, s.expected, "corr_b") == []
+        for corr in ("corr_a", "corr_b"):  # two runs do not see each other's rows
+            assert sum(e["action"] == "retrieve" for e in world.service.audit.events(corr)) == MAX_QUERY_REFINEMENTS + 1
+    finally:
+        world.close()
+
+
 # --- negative paths --------------------------------------------------------------------
+
+def test_a_policy_agent_that_does_not_dedupe_or_cap_fails_the_search_count_gate(monkeypatch):
+    monkeypatch.setattr(quality, "PolicyCompliance", _NoDedupe)
+    report = evaluate(_search_cases())
+    assert not _gate(report, "policy_search_count").passed and report.metrics["search_count_violations"] > 0
+    failed = {f["detail"].split(":")[0] for f in report.failures}
+    assert {"exact_repeat_x3", "case_and_spacing_variants", "interleaved_repeats", "four_distinct_over_budget"} <= failed
+    assert "three_distinct" not in failed  # three different searches are fine
+    assert any("retrieve rows" in f["detail"] for f in report.failures)
+    assert any("budget error missing" in f["detail"] for f in report.failures)
+
+
+def test_an_agent_that_only_dedupes_exact_strings_fails_on_case_and_spacing_variants(monkeypatch):
+    class ExactOnly(_NoDedupe):
+        def __call__(self, a):
+            self.model.queries = list(dict.fromkeys(self.model.queries))
+            return super().__call__(a)
+
+    monkeypatch.setattr(quality, "PolicyCompliance", ExactOnly)
+    failed = {f["detail"].split(":")[0] for f in evaluate(_search_cases()).failures}
+    assert "case_and_spacing_variants" in failed and "exact_repeat_x3" not in failed
+
+
+def test_a_fourth_search_is_reported_as_over_the_limit():
+    world = quality.RetrievalWorld.build()
+    try:
+        s = next(s for s in _search_cases() if s.payload["kind"] == "four_distinct_over_budget")
+        problems = quality.search_count_problems(world.service, s.payload, s.expected, "corr_x", _NoDedupe)
+        assert any("over the limit" in p for p in problems) and any("budget error missing" in p for p in problems)
+    finally:
+        world.close()
+
 
 def test_without_cluster_rules_anomaly_recall_fails(monkeypatch):
     monkeypatch.setitem(REGISTRY, "cluster_risk", lambda txns, params: [])

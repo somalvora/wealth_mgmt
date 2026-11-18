@@ -316,7 +316,7 @@ def test_shares_survive_a_restart_of_the_service(tmp_path):
 def test_the_evaluation_panel_runs_the_offline_gates_and_caches_the_result(client):
     assert client.get("/api/eval").json()["report"] is None
     report = client.post("/api/eval/run").json()["report"]
-    assert report["passed"] and len(report["gates"]) == 13 and report["scenarios"] > 200
+    assert report["passed"] and len(report["gates"]) == 14 and report["scenarios"] > 200
     assert all(g["label"] and g["label"] != g["name"] for g in report["gates"])
     assert client.get("/api/eval").json()["report"]["gates"] == report["gates"]
 
