@@ -391,3 +391,43 @@ def test_an_agent_error_reaches_the_page_as_its_type_only(service, monkeypatch):
     body = service.chat("somal", "How much did I spend on groceries in 2025?")
     assert body["agents"][0]["errors"] == ["ConnectionError", "error"] and "SECRET" not in str(body)
     assert "a.errors[0]" not in (STATIC / "demo.html").read_text()  # the briefing's failure note already says it, once
+
+
+# --- brokerage chips -----------------------------------------------------------------------------------------------
+
+BROKER_PERF = "How did my brokerage account do last month, and how much was my deposits versus the market?"
+BROKER_CONC = "Am I too concentrated in any one stock?"
+
+
+def test_the_brokerage_chips_exist_and_their_data_is_seeded(client, service):
+    from household_agent.webapp import SUGGESTIONS
+
+    assert {"member": "somal", "text": BROKER_PERF} in SUGGESTIONS and {"member": "somal", "text": BROKER_CONC} in SUGGESTIONS
+    rows = service.conn.execute("SELECT period FROM brokerage_statements ORDER BY period").fetchall()
+    assert [r[0] for r in rows] == ["2026-08", "2026-09", "2026-10"]
+    accounts = {a["account_id"]: a for a in client.get("/api/state").json()["consent"]["accounts"]} \
+        if "consent" in client.get("/api/state").json() else {a["account_id"]: a for a in service.consent_view()["accounts"]}
+    assert accounts["acct_somal_brokerage"]["scope"] == "private" and accounts["acct_somal_brokerage"]["owners"] == ["somal"]
+
+
+def test_a_reused_workdir_does_not_seed_the_brokerage_twice(tmp_path):
+    DemoService(tmp_path).close()
+    again = DemoService(tmp_path)
+    assert again.conn.execute("SELECT count(*) FROM brokerage_statements").fetchone()[0] == 3
+    again.close()
+
+
+def test_sayali_asking_about_somals_brokerage_is_refused_and_the_wording_for_checking_is_unchanged(client):
+    ask = lambda member, text: client.post("/api/chat", json={"member": member, "message": text}).json()  # noqa: E731
+    body = ask("sayali", "How did Somal's brokerage account do last month?")
+    assert body["status"] == "denied" and "somal's private brokerage account" in body["alerts"][0]["text"]
+    assert any(e["decision"] == "deny" and e["resource"] == "account:acct_somal_brokerage" for e in body["trace"])
+    viaan = ask("viaan", "How much did Somal spend at Safeway in September 2026?")
+    assert "somal's private checking account" in viaan["alerts"][0]["text"] and "brokerage" not in viaan["alerts"][0]["text"]
+    assert ask("somal", "How did my brokerage account do last month?")["status"] != "denied"
+
+
+def test_the_brokerage_account_does_not_make_the_allocation_plan_provisional(service):
+    body = service.chat("somal", "We have a surplus this month; how should we allocate it?")
+    assert "acct_somal_brokerage" not in str(body.get("approval", {}).get("excluded_accounts", body))
+    assert "acct_somal_brokerage" not in [a for a in body.get("approval", {}).get("provisional_reasons", [])]

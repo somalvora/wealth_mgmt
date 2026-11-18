@@ -60,6 +60,18 @@ def build_server(session: ToolSession) -> FastMCP:
                                                 "params": params, "allow_provisional": allow_provisional})
 
     @server.tool()
+    def brokerage_performance(account_id: str, month: str | None = None) -> dict[str, Any]:
+        """Opening value, closing value, deposits and market effect of a brokerage account for one month (YYYY-MM;
+        the latest statement when omitted)."""
+        return session.call("brokerage_performance", {"account_id": account_id, "month": month})
+
+    @server.tool()
+    def brokerage_concentration(account_id: str, month: str | None = None) -> dict[str, Any]:
+        """Largest position, top-four share, technology share and any breach of the household's concentration limits
+        for a brokerage account's statement (YYYY-MM; the latest when omitted)."""
+        return session.call("brokerage_concentration", {"account_id": account_id, "month": month})
+
+    @server.tool()
     def ingest_statement(csv_text: str, source_name: str) -> dict[str, Any]:
         """Parse, reconcile and store an hh_statement_csv_v1 statement you own."""
         return session.call("ingest_statement", {"csv_text": csv_text, "source_name": source_name})

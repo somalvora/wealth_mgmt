@@ -41,6 +41,7 @@ from household_agent.authz import Actor, AuthorizationError, Authorizer, Consent
 from household_agent.categorize import Categorizer
 from household_agent.consent import ConsentStore
 from household_agent.evals import evaluate, generate_scenarios
+from household_agent.brokerage import brokerage_documents, demo_brokerage_months
 from household_agent.history import HISTORY_PREFIX, brokerage_summaries, history_statements, history_summary, statement_source
 from household_agent.ingest import StatementParseError, parse_statement
 from household_agent.ingest.pdf_statement import MAX_PDF_BYTES
@@ -53,6 +54,7 @@ from household_agent.retrieval import RetrievalService
 from household_agent.sample_statements import samples
 from household_agent.synthetic import (
     ACCOUNTS,
+    DEMO_ACCOUNTS,
     SOMAL,
     DEMO_AS_OF,
     RULES,
@@ -74,6 +76,8 @@ SUGGESTIONS = [
     {"member": "somal", "text": "What is the monthly rent for Unit B, and who pays the property tax?"},
     {"member": "viaan", "text": "How much did Somal spend at Safeway in September 2026?"},
     {"member": "somal", "text": "How much did Sayali's card spend at Safeway in September 2026?"},
+    {"member": "somal", "text": "How did my brokerage account do last month, and how much was my deposits versus the market?"},
+    {"member": "somal", "text": "Am I too concentrated in any one stock?"},
     {"member": "somal", "text": "What's the weather in Boston?"},
 ]
 # What "share my account" grants: read and search, for questions about spending and tax. Never upload, approve or export.
@@ -97,7 +101,8 @@ GATE_LABELS = {
     "privacy_canary_exposures": "Planted secrets that leaked",
 }
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_JOINT_TOPIC = re.compile(r"\b(rent|rental|rents|tenants?|lease|unit [a-z]|property tax(?:es)?|mortgage)\b")  # the joint rental account
+_BROKERAGE_TOPIC = re.compile(r"\b(brokerage|portfolio|stocks?|holdings?)\b")
+_JOINT_TOPIC =re.compile(r"\b(rent|rental|rents|tenants?|lease|unit [a-z]|property tax(?:es)?|mortgage)\b")  # the joint rental account
 MAX_MESSAGE_CHARS = 2000
 
 
@@ -141,7 +146,7 @@ class DemoService:
 
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.workdir / "ledger.db", check_same_thread=False)
-        self.store = LedgerStore(self.conn, Authorizer(ACCOUNTS), AuditLog(self.conn))
+        self.store = LedgerStore(self.conn, Authorizer(DEMO_ACCOUNTS), AuditLog(self.conn))
         self.consent = ConsentStore(self.conn, self.store.authorizer, self.store.audit)  # reloads grants of a reused workdir
         self.eval_report: dict[str, Any] | None = None
         self.categorizer = Categorizer(RULES)
@@ -160,6 +165,8 @@ class DemoService:
             inputs_for=inputs_for, members=MEMBERS, audit=self.store.audit, checkpointer=SqliteSaver(ckpt))
         self._load_documents()
         self._seed()
+        if self.history:
+            self._seed_brokerage("corr_web_seed")
 
     def _load_documents(self) -> None:
         """A reused ``--workdir`` already holds documents; list them again."""
@@ -183,6 +190,16 @@ class DemoService:
             self._seed_history(corr)
             # last month's joint rental statement (the $3,200 county tax payment) is on file too, so the first chip needs no upload
             self._ingest(SOMAL, demo_statements()[CURRENT_RENTAL].encode(), CURRENT_RENTAL, corr)
+
+    def _seed_brokerage(self, corr: str) -> None:
+        """Somal's brokerage: three monthly statements as structured holdings (what the calculations read) and as text
+        (what retrieval finds), plus the concentration policy."""
+        if self.conn.execute("SELECT 1 FROM brokerage_statements LIMIT 1").fetchone():
+            return  # already seeded: a reused --workdir
+        for month in demo_brokerage_months():
+            self.store.ingest_brokerage_month(SOMAL, "statement_ingestion", corr, month, at=DEMO_AS_OF)
+        for doc in brokerage_documents():
+            self.retrieval.index(SOMAL, doc, correlation_id=corr, at=DEMO_AS_OF)
 
     def _seed_history(self, corr: str) -> None:
         """Two years of past statements: exact rows in the ledger, the same text in the vector index. Not listed in the UI."""
@@ -285,11 +302,14 @@ class DemoService:
         # a member who also has a private account they may not.
         if _JOINT_TOPIC.search(text) and any(a.owner_scope is OwnerScope.JOINT and readable(a) for a in ACCOUNTS):
             return None
+        # A brokerage account is only named by a question about brokerage, so "Somal's checking" never says "brokerage".
+        brokerage_question = bool(_BROKERAGE_TOPIC.search(text))
+        accounts = [a for a in DEMO_ACCOUNTS if (a.kind == "brokerage") is brokerage_question]
         denied: list[tuple[str, Any]] = []
         for other in MEMBERS:
             if other in (member, "casey_cpa") or not re.search(rf"\b{re.escape(other)}\b", text):
                 continue
-            denied += [(other, a) for a in ACCOUNTS
+            denied += [(other, a) for a in accounts
                        if a.owner_scope is OwnerScope.PRIVATE and other in a.owner_member_ids and not readable(a)]
         if not denied:
             return None
@@ -361,7 +381,7 @@ class DemoService:
                    "accounts": sorted(g.account_ids), "active": g.active_at(now), "revoked": g.revoked_at is not None}
                   for g in self.consent.grants() if g.grant_id.startswith(SHARE_PREFIX)]
         return {"accounts": [{"account_id": a.account_id, "kind": a.kind, "owners": sorted(a.owner_member_ids),
-                              "scope": a.owner_scope.value} for a in ACCOUNTS],
+                              "scope": a.owner_scope.value} for a in DEMO_ACCOUNTS],
                 "shares": shares, "grants_read_for": sorted(SHARE_PURPOSES)}
 
     def share(self, member: str, grantee: str, account_id: str) -> tuple[int, dict[str, Any]]:

@@ -145,5 +145,5 @@ def brokerage_summaries() -> list[SourceDocument]:
             text=f"# Brokerage summary {label}\nFictional ACME Brokerage account funded from acct_somal_checking. "
                  f"Contributions this quarter: {contrib / 100:,.2f} dollars. Total contributed to date: {total / 100:,.2f} dollars. "
                  f"Portfolio value at quarter end: {value:,.2f} dollars. Gain or loss to date: {gain:+,.2f} dollars. "
-                 f"Holdings: 70 percent broad stock index fund, 30 percent bond fund."))
+                 f"Individual positions are listed in the monthly brokerage statements."))
     return out

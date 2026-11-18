@@ -571,7 +571,8 @@ def test_paused_review_survives_restart(tmp_path):
 
 def test_ledger_tools_include_ingest_but_prompt_prefers_query_ledger():
     names = [t["function"]["name"] for t in LEDGER_TOOLS]
-    assert names == ["list_accounts", "query_ledger", "ingest_statement", "run_calculation"]
+    assert names == ["list_accounts", "query_ledger", "brokerage_performance", "brokerage_concentration",
+                     "ingest_statement", "run_calculation"]
     assert "prefer query_ledger" in LEDGER_PROMPT
 
 
@@ -1155,3 +1156,54 @@ def test_analyst_recovers_from_missing_then_stringified_params(seeded_store, cat
     ])(assignment())
     assert r.status == "completed" and len(r.claims) == 1
     assert len(r.errors) == 1 and "requires params start, end" in r.errors[0]  # the one failed call, now self-explaining
+
+
+# --- brokerage tools ---------------------------------------------------------------------
+
+BROKERAGE = "acct_somal_brokerage"
+
+
+def _brokerage_store(conn):
+    from household_agent.brokerage import demo_brokerage_months
+    from household_agent.ledger import LedgerStore
+    from household_agent.synthetic import DEMO_ACCOUNTS
+
+    store = LedgerStore(conn, Authorizer(DEMO_ACCOUNTS), AuditLog(conn))
+    for m in demo_brokerage_months():
+        store.ingest_brokerage_month(SOMAL, "statement_ingestion", "seed", m, at=DEMO_AS_OF)
+    return store
+
+
+def _run_ids(m, name):
+    return [r["run_id"] for r in tool_results(m, name)]
+
+
+def test_ledger_answers_a_brokerage_question_from_a_recorded_run(conn, categorizer):
+    store = _brokerage_store(conn)
+    steps = [
+        call("brokerage_performance", account_id=BROKERAGE),
+        lambda m: final({"text": "In October 2026 the account went from $31,334.23 to $31,045.73; $1,500.00 was deposited "
+                                 "and the market moved it by -$1,819.90.",
+                         "evidence_ids": _run_ids(m, "brokerage_performance")}),
+    ]
+    r = LedgerAnalyst(Scripted(steps=steps), store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)(assignment())
+    assert r.status == "completed" and len(r.claims) == 1 and r.errors == []
+    assert BROKERAGE in r.outputs["account_ids"]
+
+
+def test_a_brokerage_claim_with_an_invented_number_is_removed(conn, categorizer):
+    store = _brokerage_store(conn)
+    steps = [
+        call("brokerage_concentration", account_id=BROKERAGE),
+        lambda m: final({"text": "NovaChip is 31.4% of the portfolio.", "evidence_ids": _run_ids(m, "brokerage_concentration")}),
+    ]
+    r = LedgerAnalyst(Scripted(steps=steps), store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)(assignment())
+    assert r.claims == [] and r.status == "needs_review" and any("numbers not found" in e for e in r.errors)
+
+
+def test_brokerage_questions_route_to_the_right_agents():
+    perf = rule_route("How did my brokerage account do last month, and how much was my deposits versus the market?")
+    assert [d.agent for d in perf.dispatch_plan] == ["ledger_analyst"] and perf.intent == "historical_comparison"
+    conc = rule_route("Am I too concentrated in any one stock?")
+    assert [d.agent for d in conc.dispatch_plan] == ["ledger_analyst", "policy_compliance"]
+    assert rule_route("Please transfer $5,000 from checking to the brokerage.").external_action_requested

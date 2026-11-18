@@ -29,6 +29,11 @@ ACCOUNTS = [
     Account(account_id="acct_sayali_card", household_id=HOUSEHOLD, kind="credit_card",
             owner_member_ids=frozenset({"sayali"}), owner_scope=OwnerScope.PRIVATE),
 ]
+# Somal's brokerage holds positions, not statement rows, so it is not in ACCOUNTS (the ledger tests and evals iterate those).
+# Only the web demo adds it.
+BROKERAGE_ACCOUNT = Account(account_id="acct_somal_brokerage", household_id=HOUSEHOLD, kind="brokerage",
+                            owner_member_ids=frozenset({"somal"}), owner_scope=OwnerScope.PRIVATE)
+DEMO_ACCOUNTS = [*ACCOUNTS, BROKERAGE_ACCOUNT]
 
 RULES = [
     CategoryRule("SAN MATEO TAX COLLECTOR", "San Mateo County Tax Collector", "property_tax"),

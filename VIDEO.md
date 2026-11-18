@@ -76,7 +76,7 @@ Only the questions above were tried on live Gemma. Other questions (for example 
 - **Injection sample.** Upload `2026_09_somal_checking_injection.pdf` as somal. It reconciles; the Audit trail list shows an `index` event with an "instruction-like text flagged" tag, and nothing else happens. Do not upload it together with the tampered September sample on camera unless you want both rows in the list.
 - **Audit trail list.** Updates after every upload, question, approval and consent change; Verify chain adds the intact check.
 - **Evaluation results.** Press Run the checks: 13 plain-English gates with pass/fail, about 2 s, offline keyword router (it checks the guardrails, not model quality, and says so on the panel).
-- **Chips.** Tax, allocation, transfer refusal, groceries in 2025, the lease (rent and property tax), Viaan asking about Somal's account (refused out loud), the Sayali-card question (refused until Sayali shares) and the weather question are one click each.
+- **Chips.** Tax, allocation, transfer refusal, groceries in 2025, the lease (rent and property tax), Viaan asking about Somal's account (refused out loud), the Sayali-card question (refused until Sayali shares), two brokerage questions (how last month did, deposits versus the market; and whether one stock is too large a share, checked against the household's concentration limit) and the weather question are one click each.
 - Untested on live Gemma: the new chip questions. Rehearse them once to warm the LLM cache.
 
 ## Evaluation numbers to quote
