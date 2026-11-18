@@ -69,6 +69,7 @@ from household_agent.allocation_tool import evaluate_allocation_candidates, reso
 from household_agent.approval import APPROVER_ROLES, start_request
 from household_agent.audit import AuditLog
 from household_agent.authz import Actor, Authorizer
+from household_agent.brokerage import BROKERAGE_CALCS
 from household_agent.calc_runner import params_help
 from household_agent.categorize import Categorizer
 from household_agent.ledger import LedgerStore
@@ -188,10 +189,12 @@ ROUTER_PROMPT = (
     'allocation_planning | out_of_scope, "dispatch_plan": [{"agent": "ledger_analyst" | '
     '"policy_compliance", "task": "...", "inputs": {}}], "external_action_requested": bool, '
     '"approval_required": bool}. Never plan payments, transfers or other external actions. Intents: '
-    "historical_comparison = questions about past spending or transactions (dispatch ledger_analyst only); "
+    "historical_comparison = questions about past spending or transactions, or how a brokerage account did or what "
+    "it holds (dispatch ledger_analyst only); "
     "tax_context = questions about tax rules, deductibility, leases, HOA or insurance policy (dispatch "
     "policy_compliance only, never out_of_scope); historical_comparison_and_tax_context = both a past-spending "
-    "comparison and a tax/policy question (dispatch both agents); allocation_planning = how to use surplus "
+    "comparison and a tax/policy question, or whether a brokerage account is too concentrated against the household's "
+    "limits (dispatch both agents); allocation_planning = how to use surplus "
     "money, savings or investments (empty dispatch_plan, because a separate planner handles it, and "
     "approval_required true); out_of_scope = anything unrelated to household finance (empty dispatch_plan). "
     "Set external_action_requested true only if the request asks you to pay, transfer or wire money."
@@ -207,6 +210,9 @@ LEDGER_PROMPT = (
     "number (a difference, percentage or total) must cite the run_id from run_calculation, not just the "
     "transactions. For money in and money out (inflow, outflow, net) run cash_flow with exclude_categories "
     "[\"transfer\"]: a card payment or a move between the household's own accounts is neither income nor spending. "
+    "A brokerage account (kind brokerage in readable_accounts) has no transactions: for how it did in a month, "
+    "deposits versus the market, call brokerage_performance; for how concentrated it is, call brokerage_concentration; "
+    "leave month out for the latest statement. Quote the figures those tools return and cite their run_id. "
     + _JSON_RULE
 )
 POLICY_PROMPT = (
@@ -232,6 +238,14 @@ LEDGER_TOOLS = [
         {"account_ids": _STR_LIST, "start": {"type": "string"}, "end": {"type": "string"},
          "merchant": {"type": "string"}, "include_provisional": {"type": "boolean"}},
         ["account_ids", "start", "end"]),
+    _fn("brokerage_performance", "Opening value, closing value, deposits, dividends and market effect of a brokerage "
+                                 "account for one month. account_id must be a kind brokerage account from list_accounts; "
+                                 "month is YYYY-MM, or leave it out for the latest statement.",
+        {"account_id": {"type": "string"}, "month": {"type": "string"}}, ["account_id"]),
+    _fn("brokerage_concentration", "Largest position, top-four share, technology share and any breach of the "
+                                   "household's concentration limits, for a brokerage account's statement. account_id must be "
+                                   "a kind brokerage account from list_accounts; month is YYYY-MM, or leave it out for the latest.",
+        {"account_id": {"type": "string"}, "month": {"type": "string"}}, ["account_id"]),
     _fn("ingest_statement", "Parse, reconcile and store a CSV statement supplied in the task (needs upload rights).",
         {"csv_text": {"type": "string"}, "source_name": {"type": "string"}}, ["csv_text", "source_name"]),
     _fn("run_calculation", "Run cash_flow, category_totals, variance_between_transactions, recurring_drift or "
@@ -239,6 +253,7 @@ LEDGER_TOOLS = [
         {"fn": {"type": "string"}, "transaction_ids": _STR_LIST, "params": {"type": "object"},
          "allow_provisional": {"type": "boolean"}}, ["fn", "transaction_ids"]),
 ]
+BROKERAGE_TOOLS = frozenset(BROKERAGE_CALCS)
 LEDGER_READ_TOOLS = [t for t in LEDGER_TOOLS if t["function"]["name"] != "ingest_statement"]
 POLICY_TOOLS = [
     _fn("retrieve_verified", "Search authorized, verified sources. Leave collections out to search all of them; "
@@ -462,6 +477,7 @@ class LedgerAnalyst:
         evidence: dict[str, Any] = {}
         queried: dict[str, str] = {}  # transaction_id -> account_id, from every query_ledger result
         calculations: list[dict[str, Any]] = []
+        brokerage_accounts: set[str] = set()
         for o in loop["observations"]:
             r = o["result"]
             if not r.get("ok"):
@@ -469,6 +485,9 @@ class LedgerAnalyst:
             if o["tool"] == "query_ledger":
                 evidence.update({t["transaction_id"]: _with_money(t) for t in r["transactions"]})
                 queried.update({t["transaction_id"]: t["account_id"] for t in r["transactions"]})
+            elif o["tool"] in BROKERAGE_TOOLS:
+                evidence[r["run_id"]] = _with_money(r["output"])  # its input is one statement, not transactions
+                brokerage_accounts.add(r["account_id"])
             elif o["tool"] == "run_calculation":
                 # a run's inputs are its provenance, so "October 2025" in a claim citing it is supported
                 inputs = [evidence[i] for i in r["input_ids"] if i in evidence]
@@ -484,7 +503,7 @@ class LedgerAnalyst:
             # Top level = the latest run (kept for callers that read one run); "calculations" keeps every run so the
             # threshold check sees each of them and a later run cannot hide an earlier one's variance.
             outputs = {**calculations[-1], "calculations": calculations}
-        accounts = sorted({*queried.values(), *(x for c in calculations for x in c["account_ids"])})
+        accounts = sorted({*queried.values(), *brokerage_accounts, *(x for c in calculations for x in c["account_ids"])})
         if accounts:  # reviewer scope: every account whose transactions this job read, not just the last run's
             outputs = {**outputs, "account_ids": accounts}
         # Which source document(s) each piece of evidence came from, so a claim that cites a calculation run can be
@@ -600,6 +619,10 @@ _PLANNING = re.compile(r"\b(allocate|surplus|where should .*(?:money|\$\s?\d)|ex
 _PAY_DOWN = re.compile(r"\bpay(?:ing)?\s+(?:down|off)\b", re.I)  # "pay down the mortgage" is a choice, not a payment
 _LEDGER = re.compile(r"\b(unusual|compare|compared|last year|higher|lower|variance|spent|spend|spending|paid|summary|summari[sz]e|breakdown|break ?down|how much|expenses?|categor(?:y|ies)|purchases|transactions|charges)\b", re.I)
 _POLICY = re.compile(r"\b(tax|deduct\w*|accounted for|lease|rule|policy|compliance)\b", re.I)
+# A question about the brokerage account (how it did, what it holds). Being too concentrated is also a policy question:
+# the household's limits live in a policy document.
+_BROKERAGE = re.compile(r"\b(brokerage|portfolio|holdings?|concentrat\w*|(?:one|single|any|each) (?:stock|position))\b", re.I)
+_CONCENTRATION = re.compile(r"\b(concentrat\w*|too much in|diversif\w*)\b", re.I)
 
 
 def rule_route(request: str) -> RoutingDecision:
@@ -614,7 +637,9 @@ def rule_route(request: str) -> RoutingDecision:
         and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
     if planning:  # an allocation question is advice only; "...and transfer it" is still refused
         return RoutingDecision(intent="allocation_planning", approval_required=True, external_action_requested=external)
-    ledger, policy = bool(_LEDGER.search(request)), bool(_POLICY.search(request))
+    brokerage = bool(_BROKERAGE.search(request)) and not external  # "transfer to the brokerage" stays a refusal
+    ledger = bool(_LEDGER.search(request)) or brokerage
+    policy = bool(_POLICY.search(request)) or bool(_CONCENTRATION.search(request))
     plan = ([DispatchItem(agent="ledger_analyst", task=request)] if ledger else []) + \
            ([DispatchItem(agent="policy_compliance", task=request)] if policy else [])
     if reminder and not plan and not external:  # the deadline's source evidence comes from the policy documents

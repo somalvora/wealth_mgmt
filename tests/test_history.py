@@ -129,7 +129,7 @@ def test_seeding_fills_the_ledger_and_the_vector_index_but_not_the_document_list
     fh = seeded.retrieval.client.get_collection("hh_demo__financial_history")
     metas = fh.get(include=["metadatas"])["metadatas"]
     assert {m["statement_period"] for m in metas} >= {"2024-10", "2026-09", "2025-12"}
-    assert {m["doc_type"] for m in metas} == {"bank_statement", "brokerage_summary"}
+    assert {m["doc_type"] for m in metas} == {"bank_statement", "brokerage_summary", "brokerage_statement"}
     assert seeded.audit_status()["intact"]
 
 
