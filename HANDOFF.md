@@ -1,11 +1,10 @@
 # Handoff: demo UI additions (Household Wealth Agent)
 
 Updated 2026-11-18 (evening). Worktree: `/Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions`.
-Repo `somalvora/wealth_mgmt`. PR #20 (demo UI) and PR #21 (refusal scope, member sync) are **merged into `main`**.
-**PR #22 is merged** (refusal ordering/locking, rent-data fix). The brokerage chips are in a new PR from branch
-`demo-brokerage-chips` (title `@W-XXXXXXXX : ...`, no work item exists: owner said "No WI"). Suite passes.
-GitHub login is set up (`somalvora` is the active account, push works). Start unrelated new work on a branch off `origin/main`.
-Note: `origin/main` still has the OLD (11-17) HANDOFF.md until PR #22 merges; this file is the current one.
+Repo `somalvora/wealth_mgmt`. PRs #20 (demo UI), #21 (refusal scope, member sync), #22 (refusal ordering/locking, rent-data fix) and
+#23 (brokerage chips) are all **merged into `main`**. Nothing is open. Titles use `@W-XXXXXXXX : ...` (no work item exists: owner said "No WI").
+Suite passes on `main`. GitHub login is set up (`somalvora` is the active account, push works). Start new work on a branch off `origin/main`.
+This file is on `main` once the handoff PR that carries it merges.
 
 ## Goal
 Make the web demo (`uv run python -m household_agent.webapp ...`, page at 127.0.0.1:8000) show most of the system from the UI,
@@ -31,7 +30,7 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
   Somal's checking only), lease (Unit B rent and property tax), **viaan asks about Somal's Safeway spend (runs as viaan, refused)**,
   somal asks about Sayali's card (refused until Sayali shares), weather (out of scope).
 
-## Changed in PR #22 (merged) (2026-11-18)
+## Changed in PR #22 (merged, 2026-11-18)
 - **Rent now matches the lease.** The 2026 lease says Unit B rent is $3,400 (`synthetic.py` lease text) but the ledger deposits were
   $3,100, so the live lease chip answered "$3,100" (found in the owner's browser). Now rent is 3,000 before Apr 2025, 3,100 Apr to
   Dec 2025, **3,400 from Jan 2026** (`history.py` `_rental_rows`), and the Oct 2026 statement (`synthetic.py`, `sample_statements.py`)
@@ -46,7 +45,7 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - **Restart the server on this branch** before rehearsing: a server started earlier still shows the old plan figures
   ($51,525.11) and the raw 429 text.
 
-## Brokerage chips (new PR, 2026-11-18)
+## Brokerage chips (PR #23, merged 2026-11-18)
 Built from the owner's choice "A and B", option 2 (structured holdings plus deterministic calc tools). **All data is fictional**;
 the owner's real PDFs were shape reference only and are not in the repo (repo is PUBLIC: never add real balances, tickers, account
 numbers or PDFs).
@@ -122,13 +121,12 @@ Omit `--model` for offline mode (consent, audit, eval and refusals work; real an
 ```
 Continue the Household Wealth Agent demo-UI work. Read HANDOFF.md first, in
 /Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions
-(PRs #20 and #21 are merged; PR #22 is merged; the brokerage PR is on branch demo-brokerage-chips, so continue there or branch
-from it; GitHub login already works).
+(PRs #20 to #23 are all merged into main; nothing is open. Branch new work from origin/main; GitHub login already works).
 
 Goal: a video recorded by clicking only the suggestion chips, no upload step.
 
 Do, in order:
-1. git fetch, check PR #22 (merged or not), run `uv run python -m pytest tests -q` (should pass).
+1. git fetch, check out a fresh branch from origin/main, run `uv run python -m pytest tests -q` (should pass).
 2. Work item number: none exists; keep the `@W-XXXXXXXX : <title>` placeholder unless I give one.
 3. Brokerage chips A and B are built (see "Brokerage chips" in HANDOFF.md); I rehearse them on Gemini. Never commit real figures.
 4. Remaining low PR #20 findings (#9, #8, #6, #7, #10) only if I ask.
