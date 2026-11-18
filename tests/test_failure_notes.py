@@ -33,6 +33,11 @@ def test_another_crash_names_its_type_and_never_its_message():
     assert "ConnectionError" in note and "SECRET" not in note and "busy" not in note
 
 
+def test_a_tool_name_or_stray_number_is_not_taken_for_an_error_type_or_a_busy_model():
+    [note] = failure_notes([_failed("get_transactions: 503 rows came back")])
+    assert "busy" not in note and "get_transactions" not in note and "(error)" in note
+
+
 def test_a_failure_with_no_error_text_still_gets_a_note():
     assert "unknown error" in failure_notes([_failed()])[0]
 
