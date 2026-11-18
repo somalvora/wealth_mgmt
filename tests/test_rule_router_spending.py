@@ -29,3 +29,31 @@ def test_an_allocation_question_with_how_much_stays_allocation_planning():
 
 def test_moving_money_is_still_refused_when_a_spending_word_is_present():
     assert rule_route("Transfer $500 from checking to savings and summarize my spending").external_action_requested
+
+
+@pytest.mark.parametrize("text", [
+    "Did we pay more for utilities in October than last year?",
+    "Did I pay the electric bill twice this year?",
+    "Did you pay more for groceries this year?",
+    "Did we ever pay the plumber?",
+])
+def test_a_past_tense_did_we_pay_question_is_not_a_payment_request(text):
+    d = rule_route(text)
+    assert not d.external_action_requested and not d.approval_required
+
+
+def test_a_did_we_pay_comparison_reaches_the_ledger_analyst():
+    d = rule_route("Did we pay more for utilities in October than last year?")
+    assert d.intent == "historical_comparison" and [i.agent for i in d.dispatch_plan] == ["ledger_analyst"]
+
+
+@pytest.mark.parametrize("text", [
+    "Pay the HOA dues from the rental account.",
+    "Did we pay the plumber? Pay him $400 now.",
+    "Please pay the electric bill today",
+    "Make a payment of $500 to the plumber.",
+    "Transfer $500 to savings.",
+    "Pay the property tax now",
+])
+def test_real_payment_requests_are_still_refused(text):
+    assert rule_route(text).external_action_requested
