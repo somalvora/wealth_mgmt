@@ -55,7 +55,7 @@ Phase 1 builds the **deterministic core** that the agents will call as tools. An
 | `household_agent.llm_planner` | `LLMThoughtGenerator` (model personas, pydantic-validated, template fallback) and `LLMCritic` (clamped, advisory) behind the planner protocols | 5.8 | (planner personas / critic) |
 | `household_agent.plan_inputs` | `derive_planning_inputs` from verified statements + recorded `category_totals`; `record_plan_run` / `plan_from_ledger`; `ledger_inputs_for` for the approval graph | 3.4, 5.8 | (planner inputs) |
 | `household_agent.briefing` | `draft_monthly_briefing` (seven §10 sections, deterministic, evidence-required `BriefingItem`s) and `render_markdown` | 10 | `compose_briefing` |
-| `household_agent.evals` | `generate_scenarios(seed)` (321 seeded scenarios, 9 areas), `evaluate` → `EvalReport` with 13 §2 gates, CLI | 2, 11 | — |
+| `household_agent.evals` | `generate_scenarios(seed)` (416 seeded scenarios, 12 areas), `evaluate` → `EvalReport` with 16 §2 gates, CLI | 2, 11 | — |
 | `household_agent.eval_quality` | Calculation, anomaly, retrieval/citation and privacy-canary scenario data, independent oracles and scorers (`RetrievalWorld`, `PrivacyWorld`) | 2, 11 | — |
 | `household_agent.vertical_slice` | `run_vertical_slice(workdir, models=, embeddings=)` → `SliceReport` of 14 `Check`s; `PlaybackChatModel` offline stand-in; CLI | 12 | — |
 
