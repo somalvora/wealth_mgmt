@@ -19,8 +19,8 @@ def test_no_progress_callback_is_fine():
 def test_cli_prints_progress_to_stderr_not_stdout(capsys, tmp_path):
     main(["--out", str(tmp_path / "r.json")])
     out, err = capsys.readouterr()
-    assert "1/348" in err and "348/348" in err
-    assert "321/348" not in out and "scenarios" in out
+    assert "1/416" in err and "416/416" in err
+    assert "321/416" not in out and "scenarios" in out
 
 
 @settings(max_examples=10, deadline=None)

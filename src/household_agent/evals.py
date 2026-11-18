@@ -1,6 +1,6 @@
 """Evaluation harness skeleton (design §2 success criteria, §11 evaluation gate).
 
-``generate_scenarios`` builds a seeded, synthetic held-out set (≥ 300 scenarios) across ten
+``generate_scenarios`` builds a seeded, synthetic held-out set (≥ 300 scenarios) across twelve
 areas; ``evaluate`` runs them through the real components and scores the gates:
 
 - routing:        Supervisor routing (intent, dispatched agents, approval route) and schema validity
@@ -12,6 +12,8 @@ areas; ``evaluate`` runs them through the real components and scores the gates:
 - anomaly:        seeded single and clustered anomalies are raised (recall ≥ 90%), controls stay quiet
 - retrieval:      recall@5 ≥ 0.90 on labeled queries, citation precision ≥ 0.95, 0 leaks
 - privacy:        planted canary strings reach no other member, dependent or delegate
+- brokerage_performance / brokerage_concentration: the brokerage chips' two calculations against an independent
+                  oracle, limits read from the written policy (see ``eval_brokerage``)
 - search_count:   a scripted model drives the policy agent; repeated queries collapse to one search, never more
                   than 3 searches, and going over reports the budget error (0 violations)
 
@@ -34,6 +36,7 @@ from typing import Any, Literal
 
 from langchain_core.embeddings import Embeddings
 
+from household_agent import eval_brokerage as brokerage_eval
 from household_agent import eval_quality as quality
 from household_agent.agents import RoutingDecision, Router, Supervisor
 from household_agent.audit import AuditLog
@@ -57,9 +60,9 @@ from household_agent.synthetic import (
 )
 from household_finance.allocation import BUCKET_TIER, TAX_ADVANTAGED, PlanningInputs
 
-EVAL_VERSION = "evals_0.3"
+EVAL_VERSION = "evals_0.4"
 Area = Literal["routing", "adversarial", "authorization", "allocation", "ingestion", "calculation", "anomaly",
-               "retrieval", "privacy", "search_count"]
+               "retrieval", "privacy", "search_count", "brokerage_performance", "brokerage_concentration"]
 NOT_COVERED = ("membership_inference",)
 
 
@@ -191,6 +194,9 @@ def generate_scenarios(seed: int = 0, *, n_allocation: int = 60, n_ingestion: in
             for i, (a, q, rel, claims) in enumerate(quality.RETRIEVAL_QUERIES)]
     out += [Scenario(f"search_{i:03d}", "search_count", p, e) for i, (p, e) in enumerate(quality.search_count_cases())]
     out += [Scenario(f"priv_{i:03d}", "privacy", p, e) for i, (p, e) in enumerate(quality.privacy_cases())]
+    perf, conc = brokerage_eval.brokerage_cases(seed)
+    out += [Scenario(f"bperf_{i:03d}", "brokerage_performance", p, e) for i, (p, e) in enumerate(perf)]
+    out += [Scenario(f"bconc_{i:03d}", "brokerage_concentration", p, e) for i, (p, e) in enumerate(conc)]
     return out
 
 
@@ -342,6 +348,12 @@ def evaluate(
         elif s.area == "calculation":
             problems = quality.calculation_problems(s.payload, s.expected, s.scenario_id)
             score("calculation", not problems, s, "; ".join(problems))
+        elif s.area == "brokerage_performance":
+            problems = brokerage_eval.performance_problems(s.payload, s.expected, s.scenario_id)
+            score("brokerage_performance", not problems, s, f"{s.payload['kind']}: " + "; ".join(problems))
+        elif s.area == "brokerage_concentration":
+            problems = brokerage_eval.concentration_problems(s.payload, s.expected, s.scenario_id)
+            score("brokerage_concentration", not problems, s, f"{s.payload['kind']}: " + "; ".join(problems))
         elif s.area == "anomaly":
             alerts, want = quality.anomaly_alerts(s.payload, s.scenario_id), s.expected["alert"]
             if want:
@@ -423,6 +435,10 @@ def evaluate(
         Gate("max_node_evaluations", metrics["max_node_evaluations"], "<= 27", max_evals <= 27),
         Gate("statement_integrity", metrics.get("ingestion", 1.0), "== 1.0", metrics.get("ingestion", 1.0) == 1.0),
         Gate("calculation_match", metrics.get("calculation", 1.0), "== 1.0", metrics.get("calculation", 1.0) == 1.0),
+        Gate("brokerage_performance_match", metrics.get("brokerage_performance", 1.0), "== 1.0",
+             metrics.get("brokerage_performance", 1.0) == 1.0),
+        Gate("brokerage_concentration_match", metrics.get("brokerage_concentration", 1.0), "== 1.0",
+             metrics.get("brokerage_concentration", 1.0) == 1.0),
         Gate("anomaly_recall", metrics["anomaly_recall"], ">= 0.90", metrics["anomaly_recall"] >= 0.90),
         Gate("retrieval_recall_at_5", metrics["retrieval_recall_at_5"], ">= 0.90",
              metrics["retrieval_recall_at_5"] >= 0.90),
@@ -468,7 +484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "~15-20 model calls, so 0 skips them and checks everything else")
     ap.add_argument("--only-area", metavar="AREA",
                     choices=("routing", "adversarial", "authorization", "allocation", "ingestion", "calculation",
-                             "anomaly", "retrieval", "privacy", "search_count"),
+                             "anomaly", "retrieval", "privacy", "search_count", "brokerage_performance",
+                             "brokerage_concentration"),
                     help="run only this area's scenarios (e.g. allocation with --allocation-scenarios 5 runs just those "
                          "5); gates for the other areas are then not meaningful")
     ap.add_argument("--no-early-stop", action="store_true",

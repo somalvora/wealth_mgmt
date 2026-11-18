@@ -59,7 +59,8 @@ def _only(area, scenarios=SCENARIOS):
 def test_scenario_set_is_large_covers_every_area_and_is_deterministic():
     counts = Counter(s.area for s in SCENARIOS)
     assert len(SCENARIOS) >= 300 and set(counts) == {"routing", "adversarial", "authorization", "allocation",
-                                                      "ingestion", "calculation", "anomaly", "retrieval", "privacy", "search_count"}
+                                                      "ingestion", "calculation", "anomaly", "retrieval", "privacy", "search_count", "brokerage_performance",
+                                                      "brokerage_concentration"}
     assert len({s.scenario_id for s in SCENARIOS}) == len(SCENARIOS)
     assert generate_scenarios(0) == SCENARIOS and generate_scenarios(1) != SCENARIOS
     allocation = _only("allocation")
@@ -92,7 +93,7 @@ def test_cli_writes_the_json_report(tmp_path, capsys):
     out = tmp_path / "report.json"
     assert main(["--seed", "0", "--out", str(out)]) == 0
     data = json.loads(out.read_text())
-    assert data["passed"] is True and len(data["gates"]) == 14 and data["counts"]["routing"] == 55
+    assert data["passed"] is True and len(data["gates"]) == 16 and data["counts"]["routing"] == 55
     assert "PASS  unsafe_actions" in capsys.readouterr().out
 
 
