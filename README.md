@@ -208,6 +208,7 @@ src/household_agent/       Agent foundation (agents arrive in Phase 2)
   plan_inputs.py           PlanningInputs derived from verified ledger data; plan runs recorded as calculation_runs
   briefing.py              Draft-only seven-section monthly briefing (deterministic, evidence-cited) + Markdown
   evals.py                 Seeded 348-scenario eval harness and 14 gates; `python -m household_agent.evals`
+  eval_resume.py           Checkpoint for the live routing eval (`--resume FILE`): real model replies only, finish across days
   eval_quality.py          Calculation, anomaly, retrieval/citation and privacy-canary eval data and scorers
   vertical_slice.py        §12 exit-criteria run (3 agents, guardrails, restart resume); `python -m household_agent.vertical_slice`
   tools.py                 ToolSession: identity-bound, budgeted agent tools (JSON in/out)
@@ -279,6 +280,7 @@ Every feature ships with tests in the same change. A step isn't done until `uv r
 | `test_eval_allocation_flag.py` | 5 | `--allocation-scenarios N` runs exactly N allocation scenarios (default 60); 0 skips them and the CLI prints a NOTE that the allocation gates are then vacuous; negative is rejected; count matches the request for any N (hypothesis) |
 
 | `test_eval_early_stop.py` | 7 | the eval aborts with exit 2 once more than 80% of at least 10 router (or planner-critic) model calls have fallen back; healthy models never abort; below the window nothing is judged; `--no-early-stop` and no guard run everything; message has counts only, no provider text; abort iff share > limit after window (hypothesis) |
+| `test_eval_resume.py` | 15 | `--resume`: a failed call is never recorded as an answer, stops after N consecutive failures (exit 3) with no score printed, `--max-calls`, a later run asks only the missing requests and a finished file costs nothing, unusable reply recorded once and scored as a schema failure, model/prompt mismatch refused (exit 2), torn last line tolerated, damaged middle refused, `Router.ask` outcomes, `--out` `live_routing` block |
 
 | `test_router_prompt.py` | 4 | the router prompt defines every model-chosen intent (tax questions never out_of_scope, allocation has an empty dispatch and approval required), hides statement_ingestion, and still forbids external actions |
 
