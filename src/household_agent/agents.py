@@ -213,6 +213,9 @@ LEDGER_PROMPT = (
     "A brokerage account (kind brokerage in readable_accounts) has no transactions: for how it did in a month, "
     "deposits versus the market, call brokerage_performance; for how concentrated it is, call brokerage_concentration; "
     "leave month out for the latest statement. Quote the figures those tools return and cite their run_id. "
+    "For how a brokerage account did, lead with the result (opening value to closing value, and the percentage "
+    "change), then split it into deposits, dividends and market effect. Call it \"your brokerage account\", "
+    "never by its account id. "
     + _JSON_RULE
 )
 POLICY_PROMPT = (
@@ -540,6 +543,7 @@ class PolicyCompliance:
 
     def __call__(self, a: TaskAssignment) -> AgentResult:
         passages: dict[str, dict[str, Any]] = {}
+        done: dict[str, dict[str, Any]] = {}  # an exact repeat of a search gets its earlier answer, not a new search
         searches = 0
 
         cancel = CANCEL_EVENT.get()
@@ -549,6 +553,12 @@ class PolicyCompliance:
             if cancel is not None and cancel.is_set():
                 return {"ok": False, "error": {"type": "job_cancelled",
                                                "message": "the job time limit passed; this tool call was not run"}}
+            try:
+                key = json.dumps({**args, "query": " ".join(str(args.get("query", "")).lower().split())}, sort_keys=True)
+            except TypeError:
+                key = ""
+            if key in done:
+                return done[key]
             if searches > MAX_QUERY_REFINEMENTS:
                 return {"ok": False, "error": {"type": "budget_exhausted",
                                                "message": f"only {MAX_QUERY_REFINEMENTS} query refinements allowed"}}
@@ -562,11 +572,14 @@ class PolicyCompliance:
             except (RetrievalRequestError, TypeError, ValueError) as exc:
                 return {"ok": False, "error": {"type": "invalid_request", "message": str(exc)}}
             passages.update({p["chunk_id"]: p for p in out["passages"]})
-            return {"ok": True, "passages": [
+            result = {"ok": True, "passages": [
                 {"chunk_id": p["chunk_id"], "text": p["text"], "source_name": p["metadata"]["source_name"],
                  "authority_tier": p["authority_tier"], "verification": p["verification"],
                  "effective_tax_year": p["metadata"]["effective_tax_year"] or None}
                 for p in out["passages"]]}
+            if key:
+                done[key] = result
+            return result
 
         loop = run_react(self.model, POLICY_PROMPT, a, POLICY_TOOLS, call_tool, self.clock().date())
         claims, parse_error = parse_final(loop)
