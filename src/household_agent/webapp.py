@@ -98,6 +98,7 @@ GATE_LABELS = {
     "anomaly_recall": "Planted unusual charges are noticed",
     "retrieval_recall_at_5": "The right source is found in the top 5",
     "citation_precision": "Citations really support the claim",
+    "policy_search_count": "Policy searches are never repeated or over budget",
     "privacy_canary_exposures": "Planted secrets that leaked",
 }
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
