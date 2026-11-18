@@ -146,27 +146,29 @@ class CalculationRunner:
                 provisional = True
 
         inputs = sorted((t.transaction_id, t.version, t.amount_minor, t.row_hash) for t in transactions)
-        input_hash = _hash({"fn": fn, "library_version": hf.__version__, "params": params, "inputs": inputs})
-        output = _jsonable(REGISTRY[fn](transactions, params))
-        run = CalculationRun(
-            run_id=f"calc_run_{uuid.uuid4().hex[:12]}",
-            fn=fn,
-            library_version=hf.__version__,
-            input_ids=[i[0] for i in inputs],
-            params=params,
-            input_hash=input_hash,
-            output=output,
-            output_hash=_hash(output),
-            provisional=provisional,
-        )
-        now = datetime.now(UTC)
-        self.store.record_calculation_run(
-            {**dataclasses.asdict(run), "correlation_id": correlation_id, "created_at": now.isoformat()}
-        )
-        self.store.audit.append(
-            correlation_id=correlation_id, actor_id=actor_id, household_id=household_id,
-            action="calculate", decision="info", resource=f"calc:{run.run_id}", acting_agent=acting_agent,
-            details={"fn": fn, "input_hash": input_hash, "output_hash": run.output_hash, "provisional": provisional},
-            at=now,
-        )
-        return run
+        return record_run(self.store, fn, REGISTRY[fn](transactions, params), input_ids=[i[0] for i in inputs],
+                          params=params, actor_id=actor_id, household_id=household_id, correlation_id=correlation_id,
+                          acting_agent=acting_agent, provisional=provisional, inputs_for_hash=inputs)
+
+
+def record_run(
+    store: LedgerStore, fn: str, raw_output: Any, *, input_ids: list[str], params: dict, actor_id: str, household_id: str,
+    correlation_id: str, acting_agent: str | None = None, provisional: bool = False, inputs_for_hash: Any = None,
+    library_version: str | None = None,
+) -> CalculationRun:
+    """Hash, store and audit one finished calculation. Shared by the ledger calculations (over transactions) and the
+    brokerage ones (over a statement), so both leave the same evidence: input hash, output, output hash, audit event."""
+    library_version = library_version or hf.__version__
+    input_hash = _hash({"fn": fn, "library_version": library_version, "params": params,
+                        "inputs": inputs_for_hash if inputs_for_hash is not None else sorted(input_ids)})
+    output = _jsonable(raw_output)
+    run = CalculationRun(run_id=f"calc_run_{uuid.uuid4().hex[:12]}", fn=fn, library_version=library_version,
+                         input_ids=input_ids, params=params, input_hash=input_hash, output=output,
+                         output_hash=_hash(output), provisional=provisional)
+    now = datetime.now(UTC)
+    store.record_calculation_run({**dataclasses.asdict(run), "correlation_id": correlation_id, "created_at": now.isoformat()})
+    store.audit.append(
+        correlation_id=correlation_id, actor_id=actor_id, household_id=household_id, action="calculate",
+        decision="info", resource=f"calc:{run.run_id}", acting_agent=acting_agent,
+        details={"fn": fn, "input_hash": input_hash, "output_hash": run.output_hash, "provisional": provisional}, at=now)
+    return run
