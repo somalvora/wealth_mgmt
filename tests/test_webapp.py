@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 from household_agent.ingest import parse_statement
 from household_agent.models import Action
 from household_agent.sample_statements import samples
-from household_agent.synthetic import DEMO_AS_OF
+from household_agent.synthetic import DEMO_AS_OF, SOMAL
 from household_agent.webapp import STATIC, DemoService, create_app
 
 TAX_QUESTION = ("I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last "
@@ -431,3 +431,17 @@ def test_the_brokerage_account_does_not_make_the_allocation_plan_provisional(ser
     body = service.chat("somal", "We have a surplus this month; how should we allocate it?")
     assert "acct_somal_brokerage" not in str(body.get("approval", {}).get("excluded_accounts", body))
     assert "acct_somal_brokerage" not in [a for a in body.get("approval", {}).get("provisional_reasons", [])]
+
+
+def test_the_documents_panel_labels_each_statement_with_its_month_and_marks_the_newest():
+    page = (STATIC / "demo.html").read_text()
+    assert "(latest)" in page and "MONTHS" in page and "state.documents.forEach" in page
+
+
+def test_retrieve_rows_show_the_search_text_so_repeated_searches_are_distinguishable(service):
+    corr = "corr_retrieve_rows"
+    for query in ("county property tax guidance", "estimated tax deadlines"):
+        service.retrieval.retrieve_verified(SOMAL, "policy_lookup", query, correlation_id=corr, at=DEMO_AS_OF)
+    rows = [r["resource"] for r in service.trace(corr) if r["action"] == Action.RETRIEVE.value]
+    assert rows == ['"county property tax guidance"', '"estimated tax deadlines"']
+    assert any(e["resource"] == '"estimated tax deadlines"' for e in service.audit_status()["recent"])

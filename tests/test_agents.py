@@ -1195,7 +1195,7 @@ def test_a_brokerage_claim_with_an_invented_number_is_removed(conn, categorizer)
     store = _brokerage_store(conn)
     steps = [
         call("brokerage_concentration", account_id=BROKERAGE),
-        lambda m: final({"text": "NovaChip is 31.4% of the portfolio.", "evidence_ids": _run_ids(m, "brokerage_concentration")}),
+        lambda m: final({"text": "NVIDIA is 31.4% of the portfolio.", "evidence_ids": _run_ids(m, "brokerage_concentration")}),
     ]
     r = LedgerAnalyst(Scripted(steps=steps), store, categorizer, SOMAL, clock=lambda: DEMO_AS_OF)(assignment())
     assert r.claims == [] and r.status == "needs_review" and any("numbers not found" in e for e in r.errors)

@@ -128,8 +128,16 @@ function renderDocs() {
   const box = $('docs'); box.replaceChildren();
   if (state.history) box.appendChild(el('div', 'mute', state.history));
   if (!state.documents.length) box.appendChild(el('div', 'mute', 'None yet.'));
+  // "2026_10_rental_checking.csv" -> "Oct 2026"; the newest statement of each series (same name after the date) is "(latest)"
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const period = n => { const m = /^(\d{4})_(\d{2})_(.+)\.[^.]+$/.exec(n); return m ? { key: m[1] + m[2], series: m[3], label: MONTHS[+m[2] - 1] + ' ' + m[1] } : null; };
+  const newest = {};
+  state.documents.forEach(d => { const p = period(d.name); if (p && (newest[p.series] || '') < p.key) newest[p.series] = p.key; });
   state.documents.forEach(d => {
-    const r = el('div', 'doc'); r.appendChild(el('span', 'n', d.name)); r.appendChild(pill(d.outcome, d.outcome));
+    const r = el('div', 'doc'); r.appendChild(el('span', 'n', d.name));
+    const p = period(d.name);
+    if (p) r.appendChild(el('span', 'mute', p.label + (newest[p.series] === p.key ? ' (latest)' : '')));
+    r.appendChild(pill(d.outcome, d.outcome));
     if (d.issues && d.issues.length) r.appendChild(el('span', 'mute', d.issues.map(i => i.code).join(', ')));
     box.appendChild(r);
   });
