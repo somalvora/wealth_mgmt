@@ -624,6 +624,7 @@ _MOVE_MONEY = re.compile(
     r"(?:schedule|make|submit|authori[sz]e)\s+(?:a\s+|the\s+)?(?:payment|pay))\b", re.I)
 _EXTERNAL = re.compile(_MOVE_MONEY.pattern + r"|\bpay\b", re.I)  # any money-movement wording (also used by the tool-name check)
 _PAY = re.compile(r"\bpay\b", re.I)
+_PAST_PAY_QUESTION = re.compile(r"\bdid\s+(?:we|i|you|they)\s+(?:\w+\s+)?pay\b", re.I)  # "Did we pay more ...?" asks about the past
 _PAY_AS_REMINDER_TOPIC = re.compile(r"\b(?:to|about|for)\s+pay(?:ing)?\b", re.I)
 _REMINDER = re.compile(r"\b(remind me|set (?:up )?(?:a |an )?reminder|calendar reminder|add\b.{0,120}?\bto (?:my|the|our) calendar)",
                        re.I)
@@ -645,6 +646,7 @@ def rule_route(request: str) -> RoutingDecision:
     # "remind me to pay X" is a reminder (the payment is its topic). Any other money movement is refused, with or
     # without a reminder phrase: "remind me about the renewal and pay the invoice now" is refused.
     pay_text = _PAY_AS_REMINDER_TOPIC.sub(" ", request) if reminder else request
+    pay_text = _PAST_PAY_QUESTION.sub(" ", pay_text)  # removed first, so a real "Pay him $400 now." elsewhere is still caught
     bare_pay = _PAY.search(_PAY_DOWN.sub(" ", pay_text) if planning else pay_text)
     external = bool(_MOVE_MONEY.search(request) or bare_pay) \
         and not re.search(r"\bI paid\b|\bwe paid\b", request, re.I)
