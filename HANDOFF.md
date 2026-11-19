@@ -44,8 +44,8 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - On main today (#27 and #28 merged): **14 gates, 348 scenarios** (area `search_count`, 27 scenarios, gate `policy_search_count`,
   EVAL_VERSION `evals_0.3`), routing_accuracy 1.0 (keyword router), `unsafe_actions` 0, all 14 adversarial scenarios refuse,
   retrieval_recall_at_5 0.9444 (`retr_005` water_heater_invoice misses on the offline hash embeddings; expected).
-- **Gaps:** (1) no eval scenarios for the brokerage tools; (2) the harness has only ever run on the offline keyword router, never a
-  live model, so 0.98/1.0 is the keyword baseline, not Gemma; (3) ledger/policy answer quality is only tested with scripted models;
+- **Gaps:** (1) no eval scenarios for the brokerage tools; (2) DONE for routing: it has now run on live Gemma (run log under Open items 3);
+  the other areas are still offline only; (3) ledger/policy answer quality is only tested with scripted models;
   (4) membership inference is listed as not covered; (5) old ideas: more adversarial scenarios, indirect injection, citation cases,
   non-regression baseline.
 
@@ -75,14 +75,21 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
    independently, flags match `LIMITS_BPS` (20% single stock, 50% technology, funds exempt) and the generated policy text states
    the same limits; optional (c) a claim with an invented number is removed. Adds two gates (14 to 16). Update gate labels in
    `webapp.py` (a test requires every label differs from its name), README counts, and tests that hard-code counts.
-3. **Resumable live routing eval** (owner asked for it so the 55 routing calls complete across days without repeating work). Design:
-   `--only-area routing --resume FILE` with a checkpoint (JSONL) of scenarios where the model really answered. On rerun skip those;
-   record nothing for a fallback (rules used instead of the model) or a failed call; stop cleanly after N consecutive failures (quota),
-   print progress, exit with a distinct code; produce the final report only when all 55 have a real model answer and
-   `router_fallbacks` is 0 of 55. Trap found: a partly failed run falls back to the keyword rules and shows a healthy 0.98, and the
-   early stop (80% of at least 10 calls) will not catch it with 55 calls. Roughly 3 days at about 20 calls/day, and it shares quota
-   with chip rehearsal (rehearse first; the video is the deadline). Do not edit the router prompt in between (cache keys change).
-   The owner runs the live part: `uv run python -m household_agent.evals --only-area routing --model gemini:gemma-4-26b-a4b-it`.
+3. DONE: **Resumable live routing eval** (#31 merged). `--only-area routing --resume FILE`; the checkpoint holds only real model
+   replies, a failed call is never an answer, the keyword rules never stand in, exit 3 = paused (rerun the same command), exit 2 =
+   model or router-prompt mismatch (start a new file). Do not edit the router prompt between runs (it invalidates the checkpoint).
+   Command: `uv run python -m household_agent.evals --only-area routing --model gemini:gemma-4-26b-a4b-it --resume .cache/routing-live.jsonl --out .cache/routing-live-report.json`
+
+   **Live routing run log** (checkpoint `.cache/routing-live.jsonl`, ignored by git; header prompt hash 0cd898d26ecebf16):
+
+   | Run | Date (UTC) | Calls asked | Replies | Failed (not counted) | Result |
+   |---|---|---|---|---|---|
+   | 1 | 2026-11-19 | 55 | 55 | 0 | complete in one sitting, 493 s |
+
+   Total: **1 run, 55 model calls, 0 failed**. On `gemini:gemma-4-26b-a4b-it`: routing_accuracy **1.0000** (55/55),
+   `router_fallbacks` 0, 0 unusable replies, schema_validity 1.0, approval_gating 1.0, unsafe_actions 0; all 14 gates PASS, so the
+   live model, not just the keyword baseline, routes all 55 held-out requests correctly. Rerunning with the same file asks nothing
+   (it only re-scores). Append a row here for each further run. Note: 55 calls finished in one sitting with no 429, so the "about 20 requests/day" estimate above is too low for this model.
 4. Rehearse the live chips on Gemini (owner), then record the video.
 5. Refresh this file after the next merges. Optional later: dividend year-to-date chip; low PR #20 findings #9 (no-figures hint can be
    false), #8 (`LIKE 'hist_%'` treats `_` as a wildcard, webapp.py ~167/~188), #6 purpose hard-coded to `historical_comparison`,
@@ -111,17 +118,18 @@ main: an old server still shows old figures.
 ```
 Continue the Household Wealth Agent work (demo UI and evals). Read HANDOFF.md first, in
 /Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions
-(merged: #20-#23, #25-#28, main head 4a702fb, 14 gates / 348 scenarios; #29 is the handoff PR; GitHub push needs
-`gh auth switch --hostname github.com --user somalvora` first and a switch back to somal-vora_sfemu after, see HANDOFF.md).
+(merged: #20-#23, #25-#29, #31 (`--resume`); PR #30 brokerage evals is open and unmerged unless you see otherwise; GitHub push
+needs `gh auth switch --hostname github.com --user somalvora` first and a switch back to somal-vora_sfemu after).
+The live routing eval has run once: 55/55 model replies, routing 1.0, all 14 gates pass (run log in Open items 3).
 
 Goal: a video recorded by clicking only the suggestion chips, plus a stronger eval harness.
 
 Do, in order:
-1. git fetch; branch new work from origin/main (use the existing empty `eval-brokerage` if still unchanged; never branch from a
-   merged branch); run `uv run python -m pytest tests -q` and `uv run python -m household_agent.evals` (expect 14 gates).
-2. Add brokerage eval scenarios (performance vs an independent oracle, concentration vs the written policy), per
-   "Open items" 2 in HANDOFF.md. Use one subagent in an isolated worktree if useful. Keep titles `@W-XXXXXXXX : ...`.
-3. Then build the resumable live routing eval (`--resume`), per "Open items" 3. Never count fallbacks as model answers.
+1. git fetch; branch new work from origin/main (never from a merged branch); run `uv run python -m pytest tests -q` and
+   `uv run python -m household_agent.evals` (expect 14 gates on main, 16 once #30 merges).
+2. If #30 is still open, merge it (resolve the `evals.py` argparse and `EVAL_VERSION` conflict if any) and update counts
+   (16 gates / 416 scenarios) in README, ARCHITECTURE, VIDEO. Keep titles `@W-XXXXXXXX : ...`.
+3. Next evals: live runs of other areas (retrieval, allocation) only when the owner asks; append each run to the run log.
 4. Refresh HANDOFF.md after each merge.
 Standing rules: no real data in the repo (public); do not dispatch a code-review agent on PRs in this window; do not spend Gemini
 quota without asking, the owner runs live rehearsals and the live eval themselves; no LangSmith.
