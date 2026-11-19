@@ -15,7 +15,7 @@ uv sync
 uv run python -m household_agent.webapp          # offline; open http://127.0.0.1:8000
 ```
 
-Offline, consent, audit, evals and refusals work, but only the property-tax question has a scripted answer. For real answers use a hosted model with a free Gemini key (aistudio.google.com → **Get API key**):
+Offline, consent, audit, evals and refusals work, but only the property-tax question has a scripted answer; every other chip that needs a real answer (groceries, lease, allocation, brokerage) needs `--model`. For real answers use a hosted model with a free Gemini key (aistudio.google.com → **Get API key**):
 
 ```bash
 cp .env.example .env                              # put GEMINI_API_KEY=... in .env (git-ignored)
@@ -32,7 +32,7 @@ In the page: pick who you are (somal, sayali or viaan), click a suggestion chip 
 uv run python -m pytest tests -q                   # all tests (use `python -m pytest`, not bare `pytest`)
 uv run python -m household_agent.demo              # end-to-end demo on synthetic data
 uv run python -m household_agent.vertical_slice    # design §12 exit criteria, offline (exit 1 if a check fails)
-uv run python -m household_agent.evals --out eval.json   # 14 gates, keyword-router baseline (exit 1 if a gate fails)
+uv run python -m household_agent.evals --out eval.json   # 16 gates, keyword-router baseline (exit 1 if a gate fails)
 uv run python scripts/generate_synthetic_data.py   # (re)write data/synthetic/*.csv
 HH_LEDGER_DB=ledger.db HH_ACTOR=somal HH_PURPOSE=budgeting \
   uv run python -m household_agent.mcp_server      # MCP server on stdio
@@ -58,7 +58,7 @@ Model setup (`llm.py`): `HH_CHAT_MODEL` and `HH_EMBED_MODEL` choose the models (
 - **Agents** (`agents.py`): a LangGraph Supervisor routes each request to a Ledger Analyst and a Policy & Compliance agent, with typed handoffs and budgets. Requests to pay or transfer are refused. Models never produce numbers; every claim is checked against a recorded calculation or a verified source.
 - **Verified retrieval** (`retrieval.py`): ChromaDB with access control applied before similarity search, source and tax-year checks, and prompt-injection text flagged, never followed.
 - **Approval, reminders, briefing**: allocation plans and flagged results pause for an authorized adult; draft reminders export a local `.ics` only; the monthly briefing is deterministic and evidence-cited.
-- **Evals**: 348 seeded synthetic scenarios scoring 14 gates (routing, unsafe actions, leaks, calculations, anomalies, retrieval, citations, privacy canaries). On the live `gemma-4-26b-a4b-it` router, routing scored 55/55 with no fallbacks.
+- **Evals**: 416 seeded synthetic scenarios scoring 16 gates offline with the keyword router (routing, unsafe actions, leaks, calculations, brokerage figures, anomalies, retrieval, citations, privacy canaries). A live run on `gemma-4-26b-a4b-it` covers routing only: 55/55 correct, no fallbacks, all 16 gates pass.
 
 ## Project layout
 
@@ -66,7 +66,7 @@ Model setup (`llm.py`): `HH_CHAT_MODEL` and `HH_EMBED_MODEL` choose the models (
 src/household_finance/     Pure, deterministic finance library (no I/O)
 src/household_agent/       Ingestion, ledger, authz, audit, agents, retrieval, planning, evals, webapp
   webapp.py + static/      The chat demo (FastAPI)
-  evals.py, eval_quality.py, eval_resume.py   Eval harness, scorers, resumable live routing eval
+  evals.py, eval_quality.py, eval_brokerage.py, eval_resume.py   Eval harness, scorers, brokerage oracle, resumable live routing eval
   vertical_slice.py        Design §12 exit-criteria run
   tools.py, mcp_server.py  Identity-bound agent tools and the stdio MCP server
   llm.py                   Model selection, rate limiter, answer cache, HashEmbeddings
@@ -107,3 +107,8 @@ Every header field is required. Amounts are signed decimals with at most 2 place
 - Contribution-room values are placeholders, not IRS limits; the briefing shows no household net worth.
 - The eval set is template-generated, not human-labeled. Membership inference is not scored. Retrieval numbers use offline hash embeddings.
 - Allocation scenarios and the model planner personas have not been run on a real model.
+
+## Evaluation notes
+
+- **Live routing run** (resumable, `--only-area routing --resume FILE`): 55 held-out requests on `gemma-4-26b-a4b-it`, 55 replies, 0 failed, one sitting of 493 s. Routing accuracy 1.0000 (55/55), schema_validity 1.0000, approval_gating 1.0, unsafe_actions 0, no router fallbacks; all 16 gates pass. Retrieval, allocation and answer quality have only run offline.
+- **Tracing:** no LangSmith, Langfuse or MLflow. The harness is custom, offline and deterministic, with oracles independent of the code under test. `langsmith` appears in `uv.lock` only as a transitive dependency of `langchain-core`, and no tracing environment variables are set.
