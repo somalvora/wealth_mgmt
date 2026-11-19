@@ -193,6 +193,9 @@ def generate_scenarios(seed: int = 0, *, n_allocation: int = 60, n_ingestion: in
     out += [Scenario(f"anom_{i:03d}", "anomaly", p, e) for i, (p, e) in enumerate(quality.anomaly_cases(rng, n_anomaly))]
     out += [Scenario(f"retr_{i:03d}", "retrieval", {"actor": a, "query": q, "relevant": rel, "claims": claims}, {})
             for i, (a, q, rel, claims) in enumerate(quality.RETRIEVAL_QUERIES)]
+    out += [Scenario(f"retr_neg_{i:03d}", "retrieval",
+                     {"actor": a, "query": q, "relevant": [], "claims": [], "negatives": negs}, {})
+            for i, (a, q, negs) in enumerate(quality.NEGATIVE_CONTROLS)]
     out += [Scenario(f"search_{i:03d}", "search_count", p, e) for i, (p, e) in enumerate(quality.search_count_cases())]
     out += [Scenario(f"priv_{i:03d}", "privacy", p, e) for i, (p, e) in enumerate(quality.privacy_cases())]
     perf, conc = brokerage_eval.brokerage_cases(seed)
@@ -293,6 +296,7 @@ def evaluate(
     recall_found = recall_total = cited_ok = supported = correct_total = 0
     exposures = controls = controls_ok = 0
     search_violations = 0
+    neg_total = neg_ok = fab_missed = 0
     for i, s in enumerate(scenarios, 1):
         if progress:
             progress(i, len(scenarios), s)  # a slow hosted model otherwise looks like a hang
@@ -381,6 +385,14 @@ def evaluate(
             for doc_id in r["leaked"]:
                 failures.append({"scenario_id": s.scenario_id, "metric": "cross_member_leaks",
                                  "detail": f"retrieved {doc_id}"})
+            for n in r["negatives"]:
+                neg_total += 1
+                neg_ok += n["got"] == n["want"]
+                fab_missed += n["fabricated"] != n["fabricated_want"]
+                if n["got"] != n["want"] or n["fabricated"] != n["fabricated_want"]:
+                    failures.append({"scenario_id": s.scenario_id, "metric": "negative_controls",
+                                     "detail": f"expected {n['want']}, got {n['got']}; fabricated ids "
+                                               f"{n['fabricated']} vs {n['fabricated_want']}"})
             for ok, want in r["claims"]:
                 supported += ok
                 cited_ok += ok and want
@@ -421,6 +433,7 @@ def evaluate(
                 "max_node_evaluations": float(max_evals),
                 "retrieval_recall_at_5": _ratio(recall_found, recall_total),
                 "citation_precision": _ratio(cited_ok, supported), "citation_support_rate": _ratio(cited_ok, correct_total),
+                "negative_control_pass": _ratio(neg_ok, neg_total), "fabricated_citations_missed": float(fab_missed),
                 "anomaly_recall": _ratio(anomaly_hits, anomalies),
                 "anomaly_recall_per_transaction_rules": _ratio(per_txn_hits, anomalies),
                 "anomaly_false_alerts": float(false_alerts),

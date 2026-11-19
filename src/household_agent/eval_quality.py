@@ -25,7 +25,7 @@ import random
 import re
 import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
@@ -292,6 +292,33 @@ RETRIEVAL_QUERIES: list[tuple[str, str, list[str], list[tuple[str, str]]]] = [
 ]
 
 
+# Negative controls: (actor, query, [(claim text, cite, expected verdict)]). A cite is "doc:<doc_id>" (resolved to
+# that document's retrieved chunk) or a literal id that was never retrieved (fabricated). Expected verdicts come
+# from these labels, not from validate_claims: a figure absent from the cited source or a never-retrieved id must be
+# removed; a true-sounding sentence pinned on an unrelated source must be rephrased as a question.
+FABRICATED_ID = "chunk_never_retrieved_0001"
+NEGATIVE_CONTROLS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+    ("somal", "What are the monthly HOA dues for Unit B?",
+     [("Monthly HOA dues for Unit B are $450.00.", FABRICATED_ID, "remove")]),
+    ("somal", "What are the monthly HOA dues and the annual insurance premium for Unit B?",
+     [("Monthly HOA dues for Unit B are $450.00.", "doc:insurance_policy_2026", "remove")]),
+    ("somal", "Is there an HOA special assessment for roof repairs?",
+     [("The HOA special assessment for roof repairs is $9,999.00.", "doc:hoa_rules_2026", "remove")]),
+    ("somal", "What are the monthly HOA dues and the annual insurance premium for Unit B?",
+     [("The HOA maintains the common landscaping and the pool.", "doc:insurance_policy_2026",
+       "rephrase_as_question")]),
+]
+
+
+def fabricated_citations(claims: Sequence[Claim], passages: Sequence[dict[str, Any]]) -> list[str]:
+    """Cited evidence ids that were not among the passages retrieved in this job.
+
+    Independent of ``validate_claims``: a plain set difference against the retrieved chunk ids.
+    """
+    retrieved = {p["chunk_id"] for p in passages}
+    return [i for c in claims for i in c.evidence_ids if i not in retrieved]
+
+
 def may_see(member_id: str, account_id: str) -> bool:
     """Independent oracle (no consent grants here): owners see their accounts, adults and the
     delegate see public sources, the dependent sees nothing."""
@@ -359,7 +386,20 @@ class RetrievalWorld:
         verdicts = validate_claims([Claim(t, "fact", (c,)) for t, c, _ in cases], passages)
         supported = [v["verdict"] == "supported" for v in verdicts]
         return {"found": sorted(set(visible) & set(top)), "visible": visible, "leaked": leaked,
-                "claims": [(ok, want) for ok, (_, _, want) in zip(supported, cases, strict=True)]}
+                "claims": [(ok, want) for ok, (_, _, want) in zip(supported, cases, strict=True)],
+                "negatives": self._negatives(payload.get("negatives", []), passages)}
+
+    @staticmethod
+    def _negatives(labels: Sequence[Sequence[str]], passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for text, cite, want in labels:
+            if cite.startswith("doc:"):  # unresolved (doc not retrieved) stays fabricated and fails the label
+                cite = next((p["chunk_id"] for p in passages if p["metadata"]["doc_id"] == cite[4:]), cite)
+            claim = Claim(text, "fact", (cite,))
+            out.append({"got": validate_claims([claim], passages)[0]["verdict"], "want": want,
+                        "fabricated": len(fabricated_citations([claim], passages)),
+                        "fabricated_want": int(cite == FABRICATED_ID)})
+        return out
 
 
 # --- policy-agent search count ---------------------------------------------------------------
