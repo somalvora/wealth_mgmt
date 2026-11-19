@@ -8,13 +8,19 @@ GitHub push: `gh auth switch --hostname github.com --user somalvora`, then
 Never force-push (a hook blocks it); to update a branch after main moved, merge `origin/main` into it.
 
 ## State
-- **Merged into `main` (head 169ab8b):** #20-#23, #25-#29, #30 (brokerage eval gates), #31 (`--resume`), #32 (README trim),
+- **History was rewritten on 2026-11-19** (owner-approved, pushed by the owner): the employer email in all commits became
+  `somalvora@hotmail.com`; `main` head is now `0f36316` (tree identical to the old 169ab8b, so tests and evals are unchanged).
+  `Co-Authored-By: Claude` trailers stay (owner is fine with the `claude` contributor). Old SHAs remain reachable on GitHub via
+  hidden PR refs until GitHub support purges them. Any old clone or worktree must be re-synced from `origin/main` (branch from
+  it; do not merge old branches back, that reintroduces the old commits). Repo-local `git config user.email` is the hotmail address.
+- **Branches:** the 37 stale remote branches were deleted; only `main` and `handoff-after-35` (PR #36) remain. #33 and #24 are closed.
+  Local branches in other worktrees may still point at the old history.
+- **Merged into `main` (head 0f36316):** #20-#23, #25-#29, #30 (brokerage eval gates), #31 (`--resume`), #32 (README trim),
   #34 (final docs polish: ARCHITECTURE trimmed to the system as built with an "Extensions in future" section, VIDEO rewritten as a
   click script, README Evaluation notes, duplicate `reportlab` removed), #35 (VIDEO: allocation approval as the explicit
   human-in-the-loop segment, steps 6-8b plus a talking-points section).
 - **On main:** 16 gates, 416 scenarios, 12 areas, EVAL_VERSION `evals_0.4`, 834 tests. Offline: all gates pass; only
   `retrieval_recall_at_5` is 0.9444 (`retr_005` misses on hash embeddings, expected); `membership_inference` is not covered.
-- **Stale open PRs to close:** #33 and #24 are old handoff-only PRs, superseded by this file. Close them.
 - **Live run on `gemma-4-26b-a4b-it`** (only routing was run live): 55/55, accuracy 1.0, schema_validity 1.0, no fallbacks, all 16
   gates pass; one sitting, 493 s, 0 failed calls (recorded in README "Evaluation notes").
 
@@ -36,14 +42,16 @@ ChromaDB: collections `hh_demo__policies_compliance` (11 chunks: tax bills, IRS 
 - Gemini quota: 429/503 show an amber message and nothing is cached; answers cache in `.cache/llm.sqlite`; a prompt edit
   invalidates cache keys.
 
-## Open items before submission (owner decisions)
-1. **Delete `HANDOFF.md` before submitting** (it names the local path, the account-switch workaround and agent rules). Nothing else
-   links to it.
-2. **Employer email in git history:** all commits are authored with `somal.vora@salesforce.com` and a hotmail address in a public
-   repo. Removing it needs a history rewrite (`git filter-repo --mailmap`), destructive, owner sign-off required.
-3. **API key check:** run `git log --all -S"<first 12 chars of the key>" --oneline`; zero hits expected (`.env` is ignored).
-4. Rehearse the live chips, then record using VIDEO.md.
-5. Optional: dedicated result-review chip (needs a supervisor checkpointer in the demo, a review endpoint and UI card; decided not
+## Open items before submission
+Done: employer-email rewrite (above); API key history scan (0 hits in history and working tree); stale PRs and branches cleaned.
+1. **Rehearse the live chips, then record using VIDEO.md** (owner does this; spends Gemini quota, so not the agent). Chips to
+   check live: 1, 4, 5, 8, 9 wording and citations, the allocation plan card, chip 7's $417.62 after Sayali shares, instant
+   answers after the second restart.
+2. **Delete `HANDOFF.md` last**, in its own final PR once the owner says they are done (it names the local path, the account-switch
+   workaround and agent rules). Nothing else links to it.
+3. Check the GitHub page once: the `somal-vora` contributor entry should disappear when GitHub recomputes its cache (hours);
+   if it persists, investigate rather than rewriting again.
+4. Optional: dedicated result-review chip (needs a supervisor checkpointer in the demo, a review endpoint and UI card; decided not
    worth it this close to submission); live evals of retrieval and allocation (only when the owner asks, append to README notes);
    low PR #20 findings (`LIKE 'hist_%'` wildcard in webapp.py, purpose hard-coded to `historical_comparison`, audit and consent
    panels not filtered by member).
@@ -66,4 +74,6 @@ Evals: `uv run python -m household_agent.evals`.
 - The shell guard rejects heredocs with `$VAR`, compound git commands and `cd` into another worktree; use plain separate commands
   and absolute paths (job tmp dir: `/Users/somal.vora/.claude/jobs/ac99ea51/tmp`).
 - `demo.html` must never use `innerHTML` (a test enforces it).
+- Hooks block `git reset --hard` and force-push; to move a branch onto new main use `git switch -c <new> origin/main`.
+- The shell guard refuses git on other directories, so history-rewrite scripts run by the owner with `!` (see job tmp dir).
 - A squash merge leaves the old branch "ahead": always branch new work from `origin/main`.
