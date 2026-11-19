@@ -38,6 +38,7 @@ from langchain_core.embeddings import Embeddings
 
 from household_agent import eval_brokerage as brokerage_eval
 from household_agent import eval_quality as quality
+from household_agent import eval_resume as resume
 from household_agent.agents import RoutingDecision, Router, Supervisor
 from household_agent.audit import AuditLog
 from household_agent.authz import Authorizer
@@ -491,8 +492,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--no-early-stop", action="store_true",
                     help=f"keep going even when a model mostly falls back (default: abort with exit 2 once more than "
                          f"{EARLY_STOP[1]:.0%}% of at least {EARLY_STOP[0]} model calls have fallen back)")
+    ap.add_argument("--resume", metavar="FILE",
+                    help="live routing eval that can be finished across days: FILE (JSON lines) keeps the replies the model "
+                         "really gave, each run asks only what is missing and stops when the model stops answering (exit 3); "
+                         "the report is produced once every request has a reply. Needs --model and --only-area "
+                         "routing or adversarial; a failed call is never counted as an answer")
+    ap.add_argument("--max-consecutive-failures", type=int, default=resume.DEFAULT_MAX_CONSECUTIVE_FAILURES, metavar="N",
+                    help="with --resume: stop after N failed model calls in a row (default %(default)s)")
+    ap.add_argument("--max-calls", type=int, metavar="N",
+                    help="with --resume: make at most N model calls this run, to leave quota for other use")
     ap.add_argument("--out", help="write the JSON report here")
     args = ap.parse_args(argv)
+    if args.resume:
+        if not args.model or args.only_area not in ("routing", "adversarial"):
+            ap.error("--resume needs --model and --only-area routing (or adversarial)")
+        if args.planner_model or args.embed_model:
+            ap.error("--resume checkpoints the router only; leave out --planner-model and --embed-model")
+        if args.max_consecutive_failures < 1 or (args.max_calls is not None and args.max_calls < 1):
+            ap.error("--max-consecutive-failures and --max-calls must be at least 1")
 
     router, generator, critic = Router(), None, None
     checks: dict[str, Callable[[], object]] = {}
@@ -501,7 +518,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.model:
             chat = get_chat_model(args.model)
             router = Router(chat)
-            checks[f"--model {args.model}"] = lambda: chat.invoke("Reply with the single word: ok")
+            if not args.resume:  # a resumed run stops on its own failures, and a finished checkpoint needs no call at all
+                checks[f"--model {args.model}"] = lambda: chat.invoke("Reply with the single word: ok")
         if args.planner_model:
             from household_agent.llm_planner import LLMCritic, LLMThoughtGenerator
             model = get_chat_model(args.planner_model)
@@ -527,13 +545,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  NOTE: only the {args.only_area} area was run ({len(scenarios)} scenarios); gates for other areas "
               "are vacuous", file=sys.stderr)
     started = datetime.now(UTC)
+    checkpoint = None
+    if args.resume:
+        try:
+            checkpoint = resume.Checkpoint.open(args.resume, args.model)
+        except resume.CheckpointMismatch as e:
+            print(f"cannot resume: {e}", file=sys.stderr)
+            return 2
+
+        def ask_progress(i: int, n: int, s: Scenario) -> None:
+            print(f"[live {i}/{n} still to ask] {s.scenario_id}", file=sys.stderr, flush=True)
+
+        run = resume.collect(scenarios, router, checkpoint, max_consecutive_failures=args.max_consecutive_failures,
+                             max_calls=args.max_calls, progress=ask_progress)
+        print(resume.summary(scenarios, checkpoint, run))
+        if checkpoint.pending(scenarios):
+            print("not finished, so no report was produced (a partial run would show the keyword rules' score, not the "
+                  "model's). Nothing was lost: run the same command again.", file=sys.stderr)
+            return resume.EXIT_PAUSED
+        router = checkpoint.replay()  # every request has a real reply; score from the file, no more calls
+
     def show(i: int, n: int, s: Scenario) -> None:
         secs = (datetime.now(UTC) - started).total_seconds()
         print(f"[{secs:7.1f}s] {i}/{n} {s.area} {s.scenario_id}", file=sys.stderr, flush=True)
 
     try:
         report = evaluate(scenarios, router=router, generator=generator, critic=critic, embeddings=embeddings,
-                          progress=show, fallback_guard=None if args.no_early_stop else EARLY_STOP)
+                          progress=show,
+                          fallback_guard=None if args.no_early_stop or checkpoint else EARLY_STOP)
     except ModelUnhealthy as e:  # counts only, never the provider's message
         print(f"aborted early, the model is not answering usefully: {e}. Check quota/model name, "
               f"or pass --no-early-stop to run anyway.", file=sys.stderr)
@@ -547,8 +586,16 @@ def main(argv: Sequence[str] | None = None) -> int:
               "are vacuous and the planner model was not exercised")
     if checks:
         print("  " + fallback_summary(report, generator, critic))
+    if checkpoint:
+        print(f"  live routing: scored from {len(checkpoint.answers)} recorded model replies in {args.resume}; "
+              f"{checkpoint.invalid_replies()} unusable (counted as schema failures); {checkpoint.unavailable} failed calls "
+              "were retried, never scored")
     if args.out:
         data = json.loads(report.to_json())
+        if checkpoint:
+            data["live_routing"] = {"checkpoint": args.resume, "model": args.model, "replies": len(checkpoint.answers),
+                                    "unusable_replies": checkpoint.invalid_replies(),
+                                    "failed_calls_not_counted": checkpoint.unavailable}
         if checks:  # why each model call fell back (error types and validation messages, never provider text)
             data["model_fallbacks"] = {
                 "planner_thoughts": generator.fallbacks if generator is not None else [],
