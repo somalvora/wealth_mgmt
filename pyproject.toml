@@ -28,7 +28,6 @@ dependencies = [
 dev = [
     "pytest>=8",
     "hypothesis>=6",
-    "reportlab>=5.1.0",
 ]
 
 [build-system]

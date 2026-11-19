@@ -1003,7 +1003,6 @@ dependencies = [
 dev = [
     { name = "hypothesis" },
     { name = "pytest" },
-    { name = "reportlab" },
 ]
 
 [package.metadata]
@@ -1031,7 +1030,6 @@ requires-dist = [
 dev = [
     { name = "hypothesis", specifier = ">=6" },
     { name = "pytest", specifier = ">=8" },
-    { name = "reportlab", specifier = ">=5.1.0" },
 ]
 
 [[package]]
