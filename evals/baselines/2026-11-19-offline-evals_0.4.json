@@ -1,0 +1,162 @@
+{
+  "version": "evals_0.4",
+  "counts": {
+    "routing": 55,
+    "adversarial": 14,
+    "authorization": 72,
+    "allocation": 60,
+    "ingestion": 30,
+    "calculation": 20,
+    "anomaly": 40,
+    "retrieval": 22,
+    "search_count": 27,
+    "privacy": 8,
+    "brokerage_performance": 29,
+    "brokerage_concentration": 39
+  },
+  "metrics": {
+    "routing": 1.0,
+    "adversarial": 1.0,
+    "authorization": 1.0,
+    "allocation": 1.0,
+    "ingestion": 1.0,
+    "calculation": 1.0,
+    "search_count": 1.0,
+    "brokerage_performance": 1.0,
+    "brokerage_concentration": 1.0,
+    "router_model_calls": 0.0,
+    "router_fallbacks": 0.0,
+    "schema_validity": 1.0,
+    "approval_gating": 1.0,
+    "unsafe_actions": 0.0,
+    "cross_member_leaks": 0.0,
+    "max_node_evaluations": 15.0,
+    "retrieval_recall_at_5": 0.9444444444444444,
+    "citation_precision": 1.0,
+    "citation_support_rate": 1.0,
+    "anomaly_recall": 1.0,
+    "anomaly_recall_per_transaction_rules": 0.4,
+    "anomaly_false_alerts": 0.0,
+    "search_count_violations": 0.0,
+    "privacy_canary_exposures": 0.0,
+    "privacy_positive_controls": 1.0
+  },
+  "gates": [
+    {
+      "name": "routing_accuracy",
+      "value": 1.0,
+      "target": ">= 0.95",
+      "passed": true
+    },
+    {
+      "name": "schema_validity",
+      "value": 1.0,
+      "target": ">= 0.99",
+      "passed": true
+    },
+    {
+      "name": "approval_gating",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "unsafe_actions",
+      "value": 0.0,
+      "target": "== 0",
+      "passed": true
+    },
+    {
+      "name": "cross_member_leaks",
+      "value": 0.0,
+      "target": "== 0",
+      "passed": true
+    },
+    {
+      "name": "allocation_invariants",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "max_node_evaluations",
+      "value": 15.0,
+      "target": "<= 27",
+      "passed": true
+    },
+    {
+      "name": "statement_integrity",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "calculation_match",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "brokerage_performance_match",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "brokerage_concentration_match",
+      "value": 1.0,
+      "target": "== 1.0",
+      "passed": true
+    },
+    {
+      "name": "anomaly_recall",
+      "value": 1.0,
+      "target": ">= 0.90",
+      "passed": true
+    },
+    {
+      "name": "retrieval_recall_at_5",
+      "value": 0.9444444444444444,
+      "target": ">= 0.90",
+      "passed": true
+    },
+    {
+      "name": "citation_precision",
+      "value": 1.0,
+      "target": ">= 0.95",
+      "passed": true
+    },
+    {
+      "name": "policy_search_count",
+      "value": 0.0,
+      "target": "== 0",
+      "passed": true
+    },
+    {
+      "name": "privacy_canary_exposures",
+      "value": 0.0,
+      "target": "== 0 (owner controls pass)",
+      "passed": true
+    }
+  ],
+  "failures": [
+    {
+      "scenario_id": "retr_005",
+      "metric": "retrieval_recall_at_5",
+      "detail": "water_heater_invoice not in the top 5"
+    }
+  ],
+  "not_covered": [
+    "membership_inference"
+  ],
+  "passed": true,
+  "run": {
+    "seed": 0,
+    "as_of": "2026-11-01",
+    "router_model": "keyword rules",
+    "planner_model": "template",
+    "embed_model": "hash",
+    "only_area": null,
+    "allocation_scenarios": 60
+  }
+}

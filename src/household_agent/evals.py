@@ -592,6 +592,10 @@ def main(argv: Sequence[str] | None = None) -> int:
               "were retried, never scored")
     if args.out:
         data = json.loads(report.to_json())
+        # everything the numbers depend on, so a saved report can be compared with another run
+        data["run"] = {"seed": args.seed, "as_of": DEMO_AS_OF.date().isoformat(), "router_model": args.model or "keyword rules",
+                       "planner_model": args.planner_model or "template", "embed_model": args.embed_model or "hash",
+                       "only_area": args.only_area, "allocation_scenarios": args.allocation_scenarios}
         if checkpoint:
             data["live_routing"] = {"checkpoint": args.resume, "model": args.model, "replies": len(checkpoint.answers),
                                     "unusable_replies": checkpoint.invalid_replies(),
