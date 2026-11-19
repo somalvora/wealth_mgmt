@@ -95,6 +95,8 @@ GATE_LABELS = {
     "max_node_evaluations": "Planner stays within its search budget",
     "statement_integrity": "Statements that don't balance are caught",
     "calculation_match": "Every number matches an independent calculation",
+    "brokerage_performance_match": "Brokerage performance figures match an independent calculation",
+    "brokerage_concentration_match": "Concentration flags match the written policy",
     "anomaly_recall": "Planted unusual charges are noticed",
     "retrieval_recall_at_5": "The right source is found in the top 5",
     "citation_precision": "Citations really support the claim",

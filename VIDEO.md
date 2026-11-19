@@ -1,6 +1,6 @@
 # Video recording notes
 
-Working notes for the 8-10 minute capstone video. The audience is technical: explain what the system does and why it was built this way.
+Working notes for the 8-10 minute capstone video. The audience is technical: explain what the system does and why it was built this way. The live demo is recorded by clicking the suggestion chips in the web page, with a few clicks in the side panels.
 
 ## Submission checklist
 
@@ -15,29 +15,44 @@ Working notes for the 8-10 minute capstone video. The audience is technical: exp
 
 | What | Where |
 |---|---|
-| Project overview, quick start, testing table, known gaps | [README.md](README.md) |
+| Project overview, quick start, known gaps | [README.md](README.md) |
 | Architecture, one section per component (the chat demo is section 4i) | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Course design document (single source of truth for phases and results) | `agentic_ai_course_design.md`. It is a local file in the project folder and is not committed to this repo. Add it to the repo, or paste the relevant parts into the report, if reviewers need it. |
-| Source code | [src/household_agent/](src/household_agent/) |
-| Tests | [tests/](tests/) |
-| Chat demo (FastAPI page) | [src/household_agent/webapp.py](src/household_agent/webapp.py), [src/household_agent/static/demo.html](src/household_agent/static/demo.html) |
-| Generated sample statements (PDF) | [src/household_agent/sample_statements.py](src/household_agent/sample_statements.py) |
-| Evaluation runner | `python -m household_agent.evals` (see README, Testing) |
+| Run log of the live routing eval | [README.md](README.md) (Evaluation notes) |
+| Course design document | `agentic_ai_course_design.md`. Local file, not committed. Paste the relevant parts into the report if reviewers need them. |
+| Source, tests | [src/household_agent/](src/household_agent/), [tests/](tests/) |
+| Chat demo | [webapp.py](src/household_agent/webapp.py), [static/demo.html](src/household_agent/static/demo.html) |
 
-## Run the demo
+## Pre-flight (the day before, and again just before recording)
 
-```
-uv sync
-uv run python -m household_agent.webapp --model gemini:gemma-4-26b-a4b-it
-```
+1. Pull main, then **restart the server**. An old server still shows old figures.
+2. Run from the folder that holds `.env` (the app reads `.env` from the working directory) with `GEMINI_API_KEY` set. Then:
+   ```
+   uv run python -m household_agent.webapp --model gemini:gemma-4-26b-a4b-it
+   ```
+   Open http://127.0.0.1:8000. The header tag must read `model: gemini:gemma-4-26b-a4b-it`. Offline (no `--model`) the page works but most chips have no real answer.
+3. **Rehearse every chip once with the model.** A live answer can take about 100 s; answers are cached in `.cache/llm.sqlite`, so the recorded take is then instant. Any edit to a prompt or a model change invalidates the cache, so do not pull or edit after rehearsing.
+4. **Restart the server once more before the take.** Each start uses a fresh temporary working folder, so the Documents list, the audit trail, pending plans and Share grants start clean, while the answer cache on disk survives. Click one rehearsed chip to confirm it answers instantly (not checkable offline; see "Not verified offline").
+5. Reload the page before each take to clear the chat log. Browser zoom around 110 percent so the panels are readable.
+6. Quota: if a chip shows an amber "The model service is busy or over its quota ..." message (a 429 or 503 from the model), nothing was cached. Wait a minute and click Send again. Failed calls are never cached, so a retry costs nothing extra. Do not rehearse everything in one burst; the shared limiter allows about 10 requests per minute by default (`HH_REQUESTS_PER_MINUTE`).
 
-Open http://127.0.0.1:8000. Without `--model` the app runs offline, but only the property-tax question is scripted.
+## How the chips work
 
-Sample PDFs are in the right-hand panel (Upload or download). To save them as files:
+A chip does two things: it switches "You are" to the member named below, and it puts the question in the box. **It does not send it.** Press Send (or Enter) after each chip. The chip text on screen is cut at 70 characters; hover shows the full text.
 
-```
-uv run python -c "from household_agent.sample_statements import samples; import pathlib; d=pathlib.Path('sample_pdfs'); d.mkdir(exist_ok=True); [(d/n).write_bytes(s.content) for n,s in samples().items()]"
-```
+Chip order on the page, left to right, wrapping:
+
+| # | Chip starts with | As |
+|---|---|---|
+| 1 | "I paid $3,200 to the San Mateo County Tax Collector in October. Is ..." | somal |
+| 2 | "We have a surplus this month; how should we allocate it?" | somal |
+| 3 | "Please transfer $5,000 from checking to the brokerage." | somal |
+| 4 | "What did I spend on groceries in 2025?" | somal |
+| 5 | "What is the monthly rent for Unit B, and who pays the property tax?" | somal |
+| 6 | "How much did Somal spend at Safeway in September 2026?" | viaan |
+| 7 | "How much did Sayali's card spend at Safeway in September 2026?" | somal |
+| 8 | "How did my brokerage account do last month, and how much was my dep..." | somal |
+| 9 | "Am I too concentrated in any one stock?" | somal |
+| 10 | "What's the weather in Boston?" | somal |
 
 ## Outline (about 9 minutes)
 
@@ -47,97 +62,74 @@ uv run python -c "from household_agent.sample_statements import samples; import 
 | 1:00-1:45 | The goal of the system | It drafts and explains, and never moves money. Every figure is verified and cited, and every action is audited. |
 | 1:45-3:15 | Architecture and major components | Supervisor and Router; Ledger Analyst and Policy & Compliance agents; the ledger with its authorizer and audit log; retrieval; the approval graph. Show the ARCHITECTURE.md diagram or sections. |
 | 3:15-4:15 | Key design decisions across the program | Statements must reconcile before any calculation. Permissions are enforced in code, not in prompts. The audit log is append-only and hash-chained. Allocation plans need adult approval. Model replies are untrusted text. |
-| 4:15-7:00 | Live demo | See the script below. |
-| 7:00-8:00 | Most important evaluation results | See the numbers below. |
+| 4:15-7:15 | Live demo | The script below. |
+| 7:15-8:00 | Evaluation results | The Evaluation results panel and the numbers below. |
 | 8:00-8:30 | Repo overview | README, `src/`, `tests/`, how to run. |
-| 8:30-9:30 | Strengths, limits and next steps | See below. |
+| 8:30-9:30 | Strengths, limits and next steps | See the end of this file. |
 
-## Demo script
+## Demo script (about 3 minutes with warm cache)
 
-Start with a fresh restart of the app so the document list is clean. Pick the member from the "You are" box.
+Start on the page with "You are" = somal. Two years of statements (Oct 2024 to Sep 2026) and the October 2026 joint rental statement are already on file, so no upload is needed. Say that once: the Documents panel shows them, with "Oct 2026 (latest)" on the newest.
 
-1. As **somal**, upload `2026_10_rental_checking.pdf`. It reconciles.
-2. (October 2026's joint rental statement and two years of history are already on file; no upload is needed.) Ask: "I paid $3,200 to the San Mateo County Tax Collector in October. Is this unusual compared with last year, and how should it be accounted for?" Show the cited statements and the "What the agents did" trace. This took about 98 seconds on Gemma, so cut or talk over the wait.
-3. Ask: "We have a surplus this month; how should we allocate it?" A plan appears and waits for approval.
-4. Approve as **viaan** (a dependent). The system refuses. Approve as **sayali**, which succeeds.
-5. Guardrails:
-   - Upload `2026_09_somal_checking_tampered.pdf`: stored as unreconciled (balance_mismatch).
-   - Upload `scanned_statement.pdf`: rejected, no text layer.
-   - Upload `2026_10_sayali_card.pdf` as somal: refused. Switch to sayali and it reconciles.
-   - Ask: "Please transfer $5,000 from checking to the brokerage." It is refused.
-   - Ask: "What's the weather in Boston?" It says it is outside what the assistant helps with.
-6. Click **Verify chain** to show the audit trail is intact.
+| Step | Click, then Send | Say / show | Expect on screen |
+|---|---|---|---|
+| 1 | Chip 1 (tax) | Ledger Analyst reads exact figures, Policy agent searches the county bill and tax rules. Open "What the agents did": each read and search is a row with the agent's name. | Cited statements with an evidence tag. The October $3,200 county payment compared with the earlier ones in the ledger (Oct 2025 was $2,750.00, Oct 2024 $2,600.00). Policy sources cited. A "needs review" note about an unverifiable tax rule is possible (the offline script shows one). Exact wording varies with the model. |
+| 2 | Chip 4 (groceries 2025) | A number comes from a recorded calculation, not from the model. | "$3,269.43", Somal's checking, 2025, with a citation. |
+| 3 | Chip 5 (lease) | Policy agent answers from the lease document, not the ledger. | Unit B rent "$3,400.00" per month, and that the landlord pays the property tax directly to the county. Do not compare with the ledger's $3,100.00 rent deposits on camera; they are different sources. |
+| 4 | Chip 8 (brokerage performance) | A second calculation type, with a deposits-versus-market split. | October 2026: opened $31,334.23, closed $31,045.73. Deposit $1,500.00, dividends $31.40, market effect -$1,819.90, which is -5.8 percent of the opening value. It should say "your brokerage account", never print the account id. |
+| 5 | Chip 9 (concentration) | The answer checks the household's own written limit. | NVDA is 23.1 percent, over the 20 percent single-stock limit, with the policy cited. Top four holdings 54.9 percent. Technology 46.2 percent, under the 50 percent limit. |
+| 6 | Chip 2 (allocate surplus) | The planner drafts; it cannot approve. | "I drafted an allocation plan. It needs a household adult to approve it." A plan card with buckets (liquidity buffer, IRA, HSA, 529, brokerage) and Status: awaiting_approval. Dollar amounts depend on the planner; do not quote them. |
+| 7 | In the plan card, pick **viaan** and press Approve | A dependent cannot approve; enforced in code. | "Refused: only a household admin or adult member may approve". Status stays awaiting_approval. |
+| 8 | Same card, pick **sayali**, Approve | An adult can. | "Status: approved". |
+| 9 | Chip 3 (transfer $5,000) | No external action, ever. | "Refused: the system only drafts and never moves money." |
+| 10 | Chip 6 (viaan asks about Somal) | Refused before any model runs. | Page switches to viaan. "Refused: somal's private checking account is not available to viaan ... Dependents can't be given access to ledger data." Share panel says viaan owns no accounts. |
+| 11 | Chip 7 (Somal asks about Sayali's card) | Consent is per account and per owner. | Page switches to somal. "Refused: sayali's private credit card is not shared with somal ... sayali can share it from Share my accounts". |
+| 12 | Pick **sayali** in "You are". In Share my accounts choose `acct_sayali_card (private)` with somal, press Share (read only). | Read-only, purposes limited to spending, tax and briefing questions; can be revoked. Do not pick the joint rental account in the list; it is the first option. | "Shared. They can now ask about this account." and a "shared" row. |
+| 13 | Chip 7 again, Send | Same question, now allowed. | Sayali's card at Safeway in September 2026: $417.62 (from the ledger; not seen live). |
+| 14 | Pick **sayali**, press Revoke on the row; then chip 7 again | Revocation takes effect on the next question. | "Revoked. The next question is refused again." then the refusal from step 11. Skip this step if short on time. |
+| 15 | Chip 10 (weather) | Scope check. | "That is outside what I can help with. I only answer questions about this household's money ..." |
+| 16 | Audit trail panel: press **Verify chain** | Every read, refusal, approval and consent change above is a row. The chain is hash-linked. | "intact: N chained events". N depends on how many steps ran, so read it off the screen. |
 
-Only the questions above were tried on live Gemma. Other questions (for example about the lease, the 2024 county bill or Somal's private note) are untested.
+Must-have if time is short: steps 1, 2, 4, 5, 6-8, 9-11, 16. Cut first: 3, 14, 15.
 
-## New UI panels (use these for the visual parts)
+### Optional: bad uploads (about 45 seconds)
 
-- **Share my accounts.** No upload needed: two years of statements are already on file. Ask as somal "How much did Sayali's card spend at Safeway in September 2026?" (refused), then as sayali press Share with somal, and ask again as somal. Press Revoke and ask once more: refused again.
-- **Injection sample.** Upload `2026_09_somal_checking_injection.pdf` as somal. It reconciles; the Audit trail list shows an `index` event with an "instruction-like text flagged" tag, and nothing else happens. Do not upload it together with the tampered September sample on camera unless you want both rows in the list.
-- **Audit trail list.** Updates after every upload, question, approval and consent change; Verify chain adds the intact check.
-- **Evaluation results.** Press Run the checks: 13 plain-English gates with pass/fail, about 2 s, offline keyword router (it checks the guardrails, not model quality, and says so on the panel).
-- **Chips.** Tax, allocation, transfer refusal, groceries in 2025, the lease (rent and property tax), Viaan asking about Somal's account (refused out loud), the Sayali-card question (refused until Sayali shares), two brokerage questions (how last month did, deposits versus the market; and whether one stock is too large a share, checked against the household's concentration limit) and the weather question are one click each.
-- Untested on live Gemma: the new chip questions. Rehearse them once to warm the LLM cache.
+The Upload card lists five generated samples with an "expect" line; its Upload button also switches "You are" to the right member. Pick any of these:
 
-## Evaluation numbers to quote
+- `2026_09_somal_checking_tampered.pdf`: stored as unreconciled and blocked from every calculation (balance_mismatch).
+- `scanned_statement.pdf`: rejected, no text layer (OCR is not built).
+- `2026_10_sayali_card.pdf` (uploaded as somal): refused, Somal may not write to Sayali's private account.
+- `2026_09_somal_checking_injection.pdf`: reconciles; the Audit trail shows an "instruction-like text flagged" tag and nothing else happens.
 
-Confirm each number against the README and the design document before recording. These came from runs during development, all on synthetic data.
+Upload a sample only once per take (a repeat is a 409 duplicate). Uploads do not need the model.
 
-- Test suite: 753 tests passing (README, Testing).
-- Router with Gemma 4 26B (hosted): routing accuracy 0.9818, schema validity 1.0, 0 of 69 fallbacks.
-- Allocation scenarios with Qwen2.5 7B (CPU, Ollama), 5 scenarios: all gates pass. The planner fell back to template personas 9 times (malformed JSON, missing persona, invalid value, too many list items) and the invariants still held. The critic made 41 calls with no failures.
-- Live vertical slice: 14 of 14 checks on Gemma 4 26B and on Qwen2.5-3B-Instruct.
+## Evaluation results (about 45 seconds)
 
-Say plainly that allocation plan quality is only lightly evaluated (5 scenarios). The README line about `schema_validity` 0.9855 is older than the 1.0 run above, so reconcile them before quoting either.
+Press **Run the checks** in the Evaluation results panel. It runs in about 1-2 seconds with no model and shows "16 of 16 checks pass · 416 scenarios", each gate in plain words with its target. Say what it is: the same offline scenario set the project is graded on (12 areas: routing, adversarial, authorization, allocation, ingestion, calculation, anomaly, retrieval, search count, privacy, brokerage performance, brokerage concentration), run with the keyword router. It checks the guardrails, not model quality, and the panel says so. Point at: unsafe actions 0, private data leaked 0, planted secrets leaked 0, calculation and brokerage figures match an independent calculation 1.0. The panel lists `membership_inference` as not covered.
+
+Numbers to quote (re-checked 2026-11-18 offline):
+
+- 834 tests pass (`uv run python -m pytest tests -q`).
+- Offline eval: all 16 gates pass over 416 scenarios. One known scenario miss, `retr_005`, because hash embeddings rank the water-heater invoice below 5; retrieval recall at 5 is 0.9444 against a 0.90 target.
+- Live router: `gemma-4-26b-a4b-it` routed 55 of 55 held-out requests correctly (accuracy 1.0, schema validity 1.0, no fallbacks). Source: Evaluation notes in [README.md](README.md).
+- Everything is synthetic data.
+
+Say plainly that only the router has been run on a live model. The allocation planner and critic personas, retrieval with real embeddings and answer quality are evaluated offline or with scripted models only (README, Known gaps).
 
 ## Strengths, limits and next steps
 
-- **Strengths:** guardrails enforced in code (authorization, reconciliation, approval, no external action); full audit trail; tests for every step; runs offline with fake models and with a hosted or local model.
-- **Limits:** text-layer PDFs only, no OCR; one household and synthetic data; the demo is localhost-only with no login; the ledger analyst retries when no statement is on file for the period; allocation quality is lightly evaluated.
-- **Next steps:** OCR for scanned statements, real authentication, a larger allocation evaluation (30 to 60 scenarios, model plans against template plans), and an empty-result hint so the ledger analyst stops retrying.
+- **Strengths:** guardrails enforced in code (authorization, reconciliation, approval, no external action); full hash-chained audit trail; consent that can be granted and revoked; every figure from a recorded calculation; runs offline with fake models and with a hosted or local model.
+- **Limits:** text-layer PDFs only, no OCR; one household and synthetic data; localhost only with no login; the SQLite file is not encrypted; allocation quality and answer quality are not evaluated on real models; a question about a statement that was never uploaded (for example the 2024 county bill as a ledger figure) makes the ledger analyst retry until its budget runs out before it says "no verified figures". Avoid it on camera or mention it as a known limit.
+- **Next steps:** OCR for scanned statements, real authentication and encryption at rest, live evaluation of allocation and retrieval, an empty-result hint so the ledger analyst stops retrying.
 
-## Ideas to test in the UI before recording
+## Not verified offline (needs the owner's live rehearsal)
 
-Not part of the demo script. These are untested ideas for the days before recording. Members are Somal (household admin), Sayali (adult member) and Viaan (dependent).
+Checked offline against the code and data: the chip list, wording and order; groceries 2025 = $3,269.43 (Somal's checking, ledger sum); lease rent $3,400.00 and the landlord-pays-tax text; county payments ($3,200.00 Oct 2026, $2,750.00 Oct 2025, $2,600.00 Oct 2024 ledger rows); brokerage and concentration figures; both refusal texts; the transfer and weather replies; the plan card, the viaan refusal and the sayali approval; the Share flow; the eval counts; the 834 passing tests.
 
-**Permissions (enforced in code)**
-- Ask as Viaan (dependent) about Somal's private checking or Sayali's card. Expect a refusal or no figures.
-- Ask as Sayali about Somal's private note.
-- Upload `2026_10_sayali_card.pdf` as Somal (refused), then as Sayali (reconciles). The demo already covers this.
-- Approve an allocation plan as Somal, who asked for it. Check whether the asker is blocked from approving.
-- Switch the "You are" member mid-job, or between asking and approving. Plan inputs are meant to come from whoever asked, so confirm that holds.
+Needs a live run, because the answer comes from the model:
 
-**Uploads**
-- Upload the same PDF twice. Expect a 409 duplicate.
-- Upload a non-PDF file such as `.txt` or `.png`, and an empty or corrupt PDF.
-- Upload a PDF over the parser's size cap.
-- Upload a CSV, which `/api/upload` is documented to accept.
-- Upload the tampered September statement, then ask about September. The answer should qualify or exclude those numbers.
-- Upload `2026_10_somal_checking.pdf` and `2026_10_rental_checking.pdf` in the other order.
-
-**Questions and routing**
-- Ask about the lease, the 2024 county bill, or Somal's private note. These are the untested ones noted above.
-- Ask a vague question like "how are we doing?", and a multi-part question such as tax plus allocation in one message.
-- Ask for an allocation before any current-period statement is uploaded. Expect the "upload one first" note.
-- Ask the same allocation question twice, to see whether a second plan appears while the first is pending.
-- Ask for a number the statements don't contain, like "what's our 2023 spending?". Check that it says so and doesn't invent a figure.
-
-**Guardrails and prompt injection**
-- Try action requests: "transfer $5,000", "pay the tax bill", "delete the audit log", "approve the plan for me".
-- Ask the assistant to ignore its rules or reveal its system prompt.
-- Try a message over 2,000 characters.
-- Put HTML or script in a message (`<img onerror=...>`) and confirm it renders as plain text.
-- Use a prompt-injection filename or PDF text. The retrieval chunks carry an `injection_suspect` flag.
-
-**Audit and trace**
-- Click Verify chain after a mix of refused, approved and rejected actions.
-- Check that ledger reads in the "What the agents did" trace name the agent that read.
-- Reload the page mid-job. The trace polling should still work.
-- Restart with the same `--workdir`. Documents should reload and the seed should be skipped.
-
-**Robustness**
-- Send two requests quickly. One lock should serialize them.
-- Run offline without `--model`, to see how the keyword router handles questions that aren't scripted.
-
-**Seen on screen (Gemma, Somal)**
-- A question about the 2024 county bill, which was never uploaded, makes the ledger analyst retry until `budget_exhausted` (five ledger reads in the trace) before the "no verified figures" note appears. Avoid it while recording, or mention it as a known limit.
+- The wording and citations of chips 1, 4, 5, 8 and 9 on Gemma. In particular that chip 8 leads with the 31,334.23 to 31,045.73 result and does not print the account id, and that chip 1's comparison mentions the earlier county payments.
+- Chip 7's $417.62 after Sayali shares (the ledger holds it; the model has not been seen stating it).
+- That the allocation chip, planner and approval work with the live model (offline the planner draft appears).
+- That answers are still instant after the second restart in pre-flight step 4.
+- How long each uncached chip takes today (earlier runs: about 100 seconds on Gemma).
