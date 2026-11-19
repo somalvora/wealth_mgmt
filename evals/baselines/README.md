@@ -30,7 +30,6 @@ A live routing run also records `live_routing` (checkpoint file, model, reply co
 
 - **All 16 gates pass offline** with the keyword router, the template planner and hash embeddings. The only scenario miss is `retr_005` (hash embeddings rank the water-heater invoice below 5), and `retrieval_recall_at_5` is 0.9444 against a 0.90 gate.
 - **Router model: `gemini:gemma-4-26b-a4b-it`.** Live routing run (`--only-area routing --resume`): 55 of 55 replies, 0 failed calls, one sitting of 493 s. `routing_accuracy` 1.0000, `schema_validity` 1.0000, no router fallbacks, all 16 gates pass. The checkpoint file stays in git-ignored `.cache/`; the live-routing JSON above is its re-scored report.
-
 - **Planner model: `gemini:gemma-4-26b-a4b-it`, 3 allocation scenarios.** `allocation_invariants` 1.0000, `max_node_evaluations` 9 (limit 27), all 16 gates pass. 3 persona thoughts (one node, `GoogleAPIError`) fell back to the template and the rest came from the model; the critic made 12 calls with no failures. A small sample: it shows the model path keeps the invariants, not how good its plans are.
 
 ## Adding a snapshot
