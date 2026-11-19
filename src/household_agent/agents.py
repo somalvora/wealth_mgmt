@@ -669,26 +669,35 @@ def rule_route(request: str) -> RoutingDecision:
 class Router:
     model: BaseChatModel | None = None
 
-    def __call__(self, request: str) -> tuple[RoutingDecision, str]:
-        if self.model is None:
-            return rule_route(request), "rules"
+    def ask(self, request: str) -> tuple[RoutingDecision | None, str]:
+        """One call to the model. ``(decision, "model")`` when it answered usably; otherwise ``(None, why)`` with ``why``
+        ``"unavailable"`` (the call itself failed, so there is no model answer to judge) or ``"invalid_reply"`` (the model
+        answered, but the reply cannot be used: not the schema, or an intent the host never lets a model choose)."""
+        assert self.model is not None
         try:
             reply = self.model.invoke([SystemMessage(ROUTER_PROMPT), HumanMessage(request)])
-        except Exception:  # dropped connection or API error: the keyword rules still route the request
-            return rule_route(request), "rules_fallback"
+        except Exception:  # dropped connection or API error
+            return None, "unavailable"
         try:
             decision = RoutingDecision.model_validate_json(_FENCE.sub("", str(reply.text).strip()))
         except ValidationError:
-            return rule_route(request), "rules_fallback"
+            return None, "invalid_reply"
         rules = rule_route(request)
         if decision.intent == "statement_ingestion":  # ingestion is started by the host, never chosen by a model
-            return rules, "rules_fallback"
+            return None, "invalid_reply"
         # A yes from either the rules or the model refuses: never trust a "no" from one over a "yes" from the other.
         if rules.external_action_requested and not decision.external_action_requested:
             decision = decision.model_copy(update={"external_action_requested": True})
         if rules.reminder_requested and not decision.reminder_requested:  # the request text decides
             decision = decision.model_copy(update={"reminder_requested": True})
         return decision, "model"
+
+    def __call__(self, request: str) -> tuple[RoutingDecision, str]:
+        if self.model is None:
+            return rule_route(request), "rules"
+        decision, why = self.ask(request)
+        # a failed or unusable call: the keyword rules still route the request
+        return (decision, "model") if decision is not None else (rule_route(request), "rules_fallback")
 
 
 # --- supervisor graph --------------------------------------------------------------------
