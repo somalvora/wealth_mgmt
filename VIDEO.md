@@ -61,7 +61,7 @@ Chip order on the page, left to right, wrapping:
 | 0:00-1:00 | The problem and why it matters | Household statements are scattered across accounts. A model that invents numbers or moves money is unsafe, and household members have different permissions. |
 | 1:00-1:45 | The goal of the system | It drafts and explains, and never moves money. Every figure is verified and cited, and every action is audited. |
 | 1:45-3:15 | Architecture and major components | Supervisor and Router; Ledger Analyst and Policy & Compliance agents; the ledger with its authorizer and audit log; retrieval; the approval graph. Show the ARCHITECTURE.md diagram or sections. |
-| 3:15-4:15 | Key design decisions across the program | Statements must reconcile before any calculation. Permissions are enforced in code, not in prompts. The audit log is append-only and hash-chained. Allocation plans need adult approval. Model replies are untrusted text. |
+| 3:15-4:15 | Key design decisions across the program | Statements must reconcile before any calculation. Permissions are enforced in code, not in prompts. The audit log is append-only and hash-chained. Allocation plans need adult approval (the human-in-the-loop moment, shown live in demo steps 6-8b). Model replies are untrusted text. |
 | 4:15-7:15 | Live demo | The script below. |
 | 7:15-8:00 | Evaluation results | The Evaluation results panel and the numbers below. |
 | 8:00-8:30 | Repo overview | README, `src/`, `tests/`, how to run. |
@@ -78,9 +78,10 @@ Start on the page with "You are" = somal. Two years of statements (Oct 2024 to S
 | 3 | Chip 5 (lease) | Policy agent answers from the lease document, not the ledger. | Unit B rent "$3,400.00" per month, and that the landlord pays the property tax directly to the county. Do not compare with the ledger's $3,100.00 rent deposits on camera; they are different sources. |
 | 4 | Chip 8 (brokerage performance) | A second calculation type, with a deposits-versus-market split. | October 2026: opened $31,334.23, closed $31,045.73. Deposit $1,500.00, dividends $31.40, market effect -$1,819.90, which is -5.8 percent of the opening value. It should say "your brokerage account", never print the account id. |
 | 5 | Chip 9 (concentration) | The answer checks the household's own written limit. | NVDA is 23.1 percent, over the 20 percent single-stock limit, with the policy cited. Top four holdings 54.9 percent. Technology 46.2 percent, under the 50 percent limit. |
-| 6 | Chip 2 (allocate surplus) | The planner drafts; it cannot approve. | "I drafted an allocation plan. It needs a household adult to approve it." A plan card with buckets (liquidity buffer, IRA, HSA, 529, brokerage) and Status: awaiting_approval. Dollar amounts depend on the planner; do not quote them. |
-| 7 | In the plan card, pick **viaan** and press Approve | A dependent cannot approve; enforced in code. | "Refused: only a household admin or adult member may approve". Status stays awaiting_approval. |
-| 8 | Same card, pick **sayali**, Approve | An adult can. | "Status: approved". |
+| 6 | **Human in the loop, part 1.** Chip 2 (allocate surplus) | Say: "The system drafts a plan and then stops. It cannot approve its own plan, and nothing is executed." | "I drafted an allocation plan. It needs a household adult to approve it." A plan card with buckets (liquidity buffer, IRA, HSA, 529, brokerage) and Status: awaiting_approval, plus the Approve and Reject buttons. Dollar amounts depend on the planner; do not quote them. Open "What the agents did" to show the plan step. |
+| 7 | **Part 2: the wrong person.** In the plan card, pick **viaan** and press Approve | Say: "Viaan is a dependent. The check is in code, not in the prompt: a dependent is refused and the plan keeps waiting." | "Refused: only a household admin or adult member may approve". Status stays awaiting_approval, the buttons stay active. |
+| 8 | **Part 3: the right person.** Same card, pick **sayali**, Approve | Say: "Sayali is a household adult, so she can approve. A person made the decision, not the model." Then add: "Approval moves no money. It only records the decision; there is no execution path anywhere." | "Status: approved"; the buttons and the picker go grey. |
+| 8b | **Part 4: the evidence.** Open the Audit trail panel (it refreshed itself) | Say: "Both attempts are on the record." Point at the two approve rows, then the Verify chain in step 16 covers them. | An `approve` row with decision `deny` and the reason "approver lacks approval rights" for viaan, then an `approve` row with decision `allow` and reason "approved" for sayali. |
 | 9 | Chip 3 (transfer $5,000) | No external action, ever. | "Refused: the system only drafts and never moves money." |
 | 10 | Chip 6 (viaan asks about Somal) | Refused before any model runs. | Page switches to viaan. "Refused: somal's private checking account is not available to viaan ... Dependents can't be given access to ledger data." Share panel says viaan owns no accounts. |
 | 11 | Chip 7 (Somal asks about Sayali's card) | Consent is per account and per owner. | Page switches to somal. "Refused: sayali's private credit card is not shared with somal ... sayali can share it from Share my accounts". |
@@ -102,6 +103,18 @@ The Upload card lists five generated samples with an "expect" line; its Upload b
 - `2026_09_somal_checking_injection.pdf`: reconciles; the Audit trail shows an "instruction-like text flagged" tag and nothing else happens.
 
 Upload a sample only once per take (a repeat is a 409 duplicate). Uploads do not need the model.
+
+## Human in the loop (say it clearly, about 30 seconds around steps 6-8b)
+
+Name the idea out loud when you click chip 2: "This is the human-in-the-loop step." Then make these points, in this order:
+
+1. **The model proposes, a person decides.** The planner only drafts. The graph pauses at an interrupt and the plan stays `awaiting_approval`; nothing continues until a person responds.
+2. **Who may decide is enforced in code.** Only a household admin or adult can approve. A dependent is refused, the refusal is audited, and the plan keeps waiting.
+3. **The decision is checked at the moment of approval.** The inputs are re-hashed when someone approves; if the ledger changed since the draft, the result is `stale`, not approved.
+4. **Approval is not an action.** There is no code path that moves money, even after approval. Chip 3 (transfer $5,000) is refused outright.
+5. **Everything is on the record.** Denied and allowed approvals are rows in the audit trail, and the paused plan survives a restart because its state is in a SQLite checkpoint.
+
+One closing sentence, since only this pause is clickable in the page: "The same pause-and-resume mechanism also guards flagged results and reminder drafts; those are covered by tests and the `approval_gating` gate, not by this page." Press Reject on a fresh plan only if you have time left: it ends as `rejected`, also audited.
 
 ## Evaluation results (about 45 seconds)
 
