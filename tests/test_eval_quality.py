@@ -277,3 +277,36 @@ def test_any_seed_scores_numbers_and_anomalies_perfectly(seed):
     for p, e in quality.anomaly_cases(rng, 8):
         alerts = quality.anomaly_alerts(p, "prop")
         assert (e["alert"] in alerts) if e["alert"] else not alerts
+
+
+# --- fabricated-citation scorer and negative controls ----------------------------------------
+
+def _neg_scenarios():
+    return [s for s in _only("retrieval") if s.payload.get("negatives")]
+
+
+def test_negative_controls_get_their_labeled_verdicts():
+    world = quality.RetrievalWorld.build()
+    try:
+        for s in _neg_scenarios():
+            for n in world.score(s.payload, s.scenario_id)["negatives"]:
+                assert n["got"] == n["want"], s.scenario_id
+                assert n["fabricated"] == n["fabricated_want"], s.scenario_id
+    finally:
+        world.close()
+    assert {w for s in _neg_scenarios() for _, _, w in s.payload["negatives"]} == {"remove", "rephrase_as_question"}
+
+
+def test_fabricated_citation_scorer_fires_on_an_invented_id():
+    passages = [{"chunk_id": "c1"}, {"chunk_id": "c2"}]
+    claims = [Claim("a", "fact", ("c1",)), Claim("b", "fact", ("c2", "invented_9")), Claim("c", "fact", ("ghost",))]
+    assert quality.fabricated_citations(claims, passages) == ["invented_9", "ghost"]
+    assert quality.fabricated_citations(claims[:1], passages) == []
+
+
+def test_negative_control_fails_when_validate_claims_accepts_a_fabricated_citation(monkeypatch):
+    monkeypatch.setattr(quality, "validate_claims",
+                        lambda claims, passages, calc=None: [{"verdict": "supported"} for _ in claims])
+    report = evaluate(_neg_scenarios())
+    assert report.metrics["negative_control_pass"] == 0.0
+    assert any(f["metric"] == "negative_controls" for f in report.failures)

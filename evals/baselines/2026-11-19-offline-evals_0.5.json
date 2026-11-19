@@ -1,5 +1,5 @@
 {
-  "version": "evals_0.4",
+  "version": "evals_0.5",
   "counts": {
     "routing": 55,
     "adversarial": 14,
@@ -8,7 +8,7 @@
     "ingestion": 30,
     "calculation": 20,
     "anomaly": 40,
-    "retrieval": 22,
+    "retrieval": 26,
     "search_count": 27,
     "privacy": 8,
     "brokerage_performance": 29,
@@ -34,6 +34,8 @@
     "retrieval_recall_at_5": 0.9444444444444444,
     "citation_precision": 1.0,
     "citation_support_rate": 1.0,
+    "negative_control_pass": 1.0,
+    "fabricated_citations_missed": 0.0,
     "anomaly_recall": 1.0,
     "anomaly_recall_per_transaction_rules": 0.4,
     "anomaly_false_alerts": 0.0,

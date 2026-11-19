@@ -189,7 +189,7 @@ flowchart TD
 
 `retrieve_verified` requires an actor, purpose and query. It derives the accounts the actor may `RETRIEVE` (plus `PUBLIC`; dependents get none) and queries ChromaDB with a `where` filter on household, account scope and active status, so unauthorized chunks never enter the candidate set. Up to 20 candidates go through MMR (lambda 0.65) to at most 5 passages, each verified (chunk hash, expiry, tax year) as `verified`, `hash_mismatch`, `expired` or `wrong_period`, and the retrieval is audited, including instruction-like chunks (flagged, never followed). Embeddings always come from `llm.get_embeddings()`. Chunking: 500-word windows with 100 overlap; statements in 25-row groups with the header repeated.
 
-`validate_claims` returns `supported`, `remove` or `rephrase_as_question`. A tax claim needs a verified Tier-1 passage for the same tax year; numbers must appear in the cited evidence or calculation output; citing anything not retrieved in this job removes the claim; and a cited claim must share at least half its content words with its passages (a lexical check: it catches a wrong source, not a subtle paraphrase error).
+`validate_claims` returns `supported`, `remove` or `rephrase_as_question`. A tax claim needs a verified Tier-1 passage for the same tax year; numbers must appear in the cited evidence or calculation output; citing anything not retrieved in this job removes the claim; and a cited claim must share at least half its content words with its passages (a lexical check: it catches a wrong source, not a subtle paraphrase error). Four negative-control scenarios in the eval suite feed a never-retrieved id, a retrieved-but-irrelevant source, and an unsupported figure, and the independent scorer `fabricated_citations` (cited ids minus retrieved ids) must flag the invented id; see section 11.
 
 ## 9. Monthly briefing
 
@@ -205,7 +205,7 @@ Panels: Ask (with 10 suggestion chips), You are, Share my accounts (consent: rea
 
 ## 11. Evaluation harness
 
-`python -m household_agent.evals` runs 416 seeded synthetic scenarios (seed 0) in 12 areas through the real components and scores 16 gates (`EVAL_VERSION = "evals_0.4"`). It exits 1 if a gate fails. Oracles are independent of the code under test.
+`python -m household_agent.evals` runs 420 seeded synthetic scenarios (seed 0) in 12 areas through the real components and scores 16 gates (`EVAL_VERSION = "evals_0.5"`). It exits 1 if a gate fails. Oracles are independent of the code under test.
 
 | Area | Scenarios | Gate(s) |
 |---|---|---|
@@ -218,9 +218,11 @@ Panels: Ask (with 10 suggestion chips), You are, Share my accounts (consent: rea
 | brokerage_performance | 29 | `brokerage_performance_match` == 1.0 |
 | brokerage_concentration | 39 | `brokerage_concentration_match` == 1.0 (limits read from the written policy) |
 | anomaly | 40 | `anomaly_recall` >= 0.90 |
-| retrieval | 22 | `retrieval_recall_at_5` >= 0.90; `citation_precision` >= 0.95 |
+| retrieval | 26 | `retrieval_recall_at_5` >= 0.90; `citation_precision` >= 0.95 |
 | search_count | 27 | `policy_search_count` == 0 violations (repeats collapse, never more than 3 searches) |
 | privacy | 8 | `privacy_canary_exposures` == 0 (and owners see their canary) |
+
+The retrieval area includes 4 negative controls (`retr_neg_*`, labeled expected verdicts: `remove` for a fabricated id, a figure the source lacks, or a wrong-source figure; `rephrase_as_question` for a wrong-source sentence with no figure). They report two advisory metrics, outside the 16 gates: `negative_control_pass` (verdicts match labels) and `fabricated_citations_missed` (scorer disagreements, expected 0); a mismatch is listed under failures as `negative_controls`. `EVAL_VERSION` is `evals_0.5` because the scenario set grew from 416 to 420; the 22 existing retrieval scenarios are unchanged.
 
 Offline (keyword router, deterministic planner, hash embeddings) all 16 gates pass; the one scenario miss is `retr_005`, where hash embeddings rank the water-heater invoice below 5. With real models, add `--model`, `--planner-model`, `--embed-model` (`ollama:`, `gemini:`, `groq:`); the CLI makes one preflight call per model and exits 2 on failure, aborts early (exit 2) if more than 80% of router or critic calls fall back, and `--only-area` runs one area (the other gates are then vacuous). `--allocation-scenarios N` shrinks the costly allocation set. Live routing can be finished across sittings with `--only-area routing --resume FILE` (`eval_resume`): the checkpoint stores only real model replies, a failed call is never counted and the keyword rules never stand in, exit 3 means paused (run again) and exit 2 means the model or router prompt changed. The report prints only when every request has a model reply. Live run on `gemma-4-26b-a4b-it`: routing 55/55 (accuracy 1.0, schema_validity 1.0, no fallbacks) and all 16 gates pass (see Evaluation notes in README.md). Every `--out` report carries a `run` block (seed, fixed clock, router, planner and embedding models, area filter), and saved snapshots live in [`evals/baselines/`](evals/baselines/README.md).
 
@@ -251,7 +253,7 @@ SQLite tables `documents`, `statement_balances`, `raw_rows`, `transactions` (cor
 | Result from another job | Correlation, task and agent IDs checked | `agents` |
 | Flagged result accepted by the wrong person | Review interrupt with household and account authorization | `agents` |
 | Model failure | Router falls back to rules; planner to templates; failures recorded | `agents`, `llm_planner` |
-| Regressions | 416 scenarios, 16 gates, CLI exit code | `evals` |
+| Regressions | 420 scenarios, 16 gates, CLI exit code | `evals` |
 
 ## 15. Extensions in future
 

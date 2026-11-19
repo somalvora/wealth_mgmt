@@ -58,7 +58,7 @@ Model setup (`llm.py`): `HH_CHAT_MODEL` and `HH_EMBED_MODEL` choose the models (
 - **Agents** (`agents.py`): a LangGraph Supervisor routes each request to a Ledger Analyst and a Policy & Compliance agent, with typed handoffs and budgets. Requests to pay or transfer are refused. Models never produce numbers; every claim is checked against a recorded calculation or a verified source.
 - **Verified retrieval** (`retrieval.py`): ChromaDB with access control applied before similarity search, source and tax-year checks, and prompt-injection text flagged, never followed.
 - **Approval, reminders, briefing**: allocation plans and flagged results pause for an authorized adult; draft reminders export a local `.ics` only; the monthly briefing is deterministic and evidence-cited.
-- **Evals**: 416 seeded synthetic scenarios scoring 16 gates offline with the keyword router (routing, unsafe actions, leaks, calculations, brokerage figures, anomalies, retrieval, citations, privacy canaries). A live run on `gemma-4-26b-a4b-it` covers routing only: 55/55 correct, no fallbacks, all 16 gates pass.
+- **Evals**: 420 seeded synthetic scenarios scoring 16 gates offline with the keyword router (routing, unsafe actions, leaks, calculations, brokerage figures, anomalies, retrieval, citations, privacy canaries). A live run on `gemma-4-26b-a4b-it` covers routing only: 55/55 correct, no fallbacks, all 16 gates pass.
 
 ### How a request flows
 
@@ -139,5 +139,7 @@ Every header field is required. Amounts are signed decimals with at most 2 place
 ## Evaluation notes
 
 - **Live routing run** (resumable, `--only-area routing --resume FILE`): 55 held-out requests on `gemma-4-26b-a4b-it`, 55 replies, 0 failed, one sitting of 493 s. Routing accuracy 1.0000 (55/55), schema_validity 1.0000, approval_gating 1.0, unsafe_actions 0, no router fallbacks; all 16 gates pass. Retrieval, allocation and answer quality have only run offline.
+- **Fabricated-citation negative controls:** 4 offline `retr_neg_*` scenarios (never-retrieved id, wrong source, unsupported figure) must get their labeled `remove` / `rephrase_as_question` verdicts, and an independent scorer must flag the invented id. Reported as advisory metrics `negative_control_pass` and `fabricated_citations_missed`, not gates.
+- **Live retrieval run** (`--only-area retrieval --embed-model ollama:nomic-embed-text`): `retrieval_recall_at_5` 1.0000 against 0.9444 with hash embeddings (the `retr_005` miss disappears), citation_precision 1.0000, negative controls pass, no failures. Live allocation (3 scenarios, `gemma-4-26b-a4b-it`): allocation_invariants 1.0, max 9 evaluations, 3 persona thoughts fell back to the template. Answer quality has only run offline.
 - **Baselines:** saved runs and the settings they pin (seed, clock, models) are in [`evals/baselines/`](evals/baselines/README.md).
 - **Tracing:** no LangSmith, Langfuse or MLflow. The harness is custom, offline and deterministic, with oracles independent of the code under test. `langsmith` appears in `uv.lock` only as a transitive dependency of `langchain-core`, and no tracing environment variables are set.

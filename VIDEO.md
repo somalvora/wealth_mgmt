@@ -118,12 +118,12 @@ One closing sentence, since only this pause is clickable in the page: "The same 
 
 ## Evaluation results (about 45 seconds)
 
-Press **Run the checks** in the Evaluation results panel. It runs in about 1-2 seconds with no model and shows "16 of 16 checks pass · 416 scenarios", each gate in plain words with its target. Say what it is: the same offline scenario set the project is graded on (12 areas: routing, adversarial, authorization, allocation, ingestion, calculation, anomaly, retrieval, search count, privacy, brokerage performance, brokerage concentration), run with the keyword router. It checks the guardrails, not model quality, and the panel says so. Point at: unsafe actions 0, private data leaked 0, planted secrets leaked 0, calculation and brokerage figures match an independent calculation 1.0. The panel lists `membership_inference` as not covered.
+Press **Run the checks** in the Evaluation results panel. It runs in about 1-2 seconds with no model and shows "16 of 16 checks pass · 420 scenarios", each gate in plain words with its target. Say what it is: the same offline scenario set the project is graded on (12 areas: routing, adversarial, authorization, allocation, ingestion, calculation, anomaly, retrieval, search count, privacy, brokerage performance, brokerage concentration), run with the keyword router. It checks the guardrails, not model quality, and the panel says so. Point at: unsafe actions 0, private data leaked 0, planted secrets leaked 0, calculation and brokerage figures match an independent calculation 1.0. The panel lists `membership_inference` as not covered.
 
 Numbers to quote (re-checked 2026-11-18 offline):
 
 - 834 tests pass (`uv run python -m pytest tests -q`).
-- Offline eval: all 16 gates pass over 416 scenarios. One known scenario miss, `retr_005`, because hash embeddings rank the water-heater invoice below 5; retrieval recall at 5 is 0.9444 against a 0.90 target.
+- Offline eval: all 16 gates pass over 420 scenarios. One known scenario miss, `retr_005`, because hash embeddings rank the water-heater invoice below 5; retrieval recall at 5 is 0.9444 against a 0.90 target.
 - Live router: `gemma-4-26b-a4b-it` routed 55 of 55 held-out requests correctly (accuracy 1.0, schema validity 1.0, no fallbacks). Source: Evaluation notes in [README.md](README.md).
 - Everything is synthetic data.
 
