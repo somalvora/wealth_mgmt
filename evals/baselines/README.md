@@ -7,6 +7,7 @@ Named snapshots of eval runs. Each one is the evidence behind a claim in README 
 | File | What it is |
 |---|---|
 | `2026-11-19-offline-evals_0.4.json` | Offline run, all 16 gates, written by `uv run python -m household_agent.evals --out <file>`. |
+| `2026-11-19-live-routing-gemma-4-26b-a4b-it.json` | Live routing replies from `gemini:gemma-4-26b-a4b-it` (55/55, recorded 2026-11-18), re-scored on `evals_0.4` from the saved checkpoint with 0 new model calls. Only the routing gates are meaningful; the other areas ran offline in the same report. |
 
 Compare a new run with the saved one by diffing the `gates` and `metrics` blocks.
 
@@ -27,7 +28,7 @@ A live routing run also records `live_routing` (checkpoint file, model, reply co
 ## Decisions these snapshots back
 
 - **All 16 gates pass offline** with the keyword router, the template planner and hash embeddings. The only scenario miss is `retr_005` (hash embeddings rank the water-heater invoice below 5), and `retrieval_recall_at_5` is 0.9444 against a 0.90 gate.
-- **Router model: `gemini:gemma-4-26b-a4b-it`.** Live routing run (`--only-area routing --resume`): 55 of 55 replies, 0 failed calls, one sitting of 493 s. `routing_accuracy` 1.0000, `schema_validity` 1.0000, no router fallbacks, all 16 gates pass. This run's checkpoint file lived in git-ignored `.cache/`, so the figures are recorded here and in README "Evaluation notes" rather than as a JSON snapshot.
+- **Router model: `gemini:gemma-4-26b-a4b-it`.** Live routing run (`--only-area routing --resume`): 55 of 55 replies, 0 failed calls, one sitting of 493 s. `routing_accuracy` 1.0000, `schema_validity` 1.0000, no router fallbacks, all 16 gates pass. The checkpoint file stays in git-ignored `.cache/`; the live-routing JSON above is its re-scored report. Retrieval and allocation have not been run on a live model.
 
 ## Adding a snapshot
 
