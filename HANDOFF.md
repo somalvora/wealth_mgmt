@@ -67,14 +67,15 @@ so a video can be recorded by clicking only the suggestion chips. No upload step
 - Do not spend Gemini quota without asking.
 
 ## Open items (in order)
-1. DONE: #27 and #28 merged; suite verified passing on main (4a702fb).
-2. **Brokerage eval scenarios** (owner approved, not started; branch `eval-brokerage` exists off origin/main, empty).
-   Model on the existing `calculation` area: generate about 30 random portfolios/months and check against an independent oracle
-   (no import of `brokerage.py` logic): (a) opening + deposits + dividends + market effect = closing to the cent, percent change,
-   opening = previous closing, deposits equal the `ACME BROKERAGE TRANSFER` ledger rows; (b) concentration shares recomputed
-   independently, flags match `LIMITS_BPS` (20% single stock, 50% technology, funds exempt) and the generated policy text states
-   the same limits; optional (c) a claim with an invented number is removed. Adds two gates (14 to 16). Update gate labels in
-   `webapp.py` (a test requires every label differs from its name), README counts, and tests that hard-code counts.
+1. DONE: #27, #28, #31 (`--resume`) and #32 (README trim + run log) merged; main head 5220d92.
+2. **PR #30 (brokerage eval gates) is OPEN, not merged** (branch `eval-brokerage`, `eval_brokerage.py`, 13 tests, gates
+   `brokerage_performance_match` and `brokerage_concentration_match`, EVAL_VERSION `evals_0.4`, 14 to 16 gates, 348 to 416
+   scenarios; mutation tests prove each gate can fail). It conflicts with main only on the `evals.py` argparse/`EVAL_VERSION` lines
+   (from #31). To finish: rebase onto origin/main, resolve, run the suite, then after merge update the counts (16 gates / 416
+   scenarios) in README, ARCHITECTURE, VIDEO and the "On main today" line above.
+   Original spec for reference: independent oracle (no import of `brokerage.py` logic) for (a) opening + deposits + dividends +
+   market effect = closing, percent change, opening = previous closing, deposits equal the `ACME BROKERAGE TRANSFER` rows; (b)
+   concentration shares and flags vs `LIMITS_BPS` (20% single stock, 50% technology, funds exempt) and the policy text.
 3. DONE: **Resumable live routing eval** (#31 merged). `--only-area routing --resume FILE`; the checkpoint holds only real model
    replies, a failed call is never an answer, the keyword rules never stand in, exit 3 = paused (rerun the same command), exit 2 =
    model or router-prompt mismatch (start a new file). Do not edit the router prompt between runs (it invalidates the checkpoint).
@@ -118,8 +119,8 @@ main: an old server still shows old figures.
 ```
 Continue the Household Wealth Agent work (demo UI and evals). Read HANDOFF.md first, in
 /Users/somal.vora/Desktop/Agentic AI Course/project/.claude/worktrees/demo-ui-additions
-(merged: #20-#23, #25-#29, #31 (`--resume`); PR #30 brokerage evals is open and unmerged unless you see otherwise; GitHub push
-needs `gh auth switch --hostname github.com --user somalvora` first and a switch back to somal-vora_sfemu after).
+(merged: #20-#23, #25-#29, #31 (`--resume`), #32; main head 5220d92, 14 gates / 348 scenarios; PR #30 brokerage evals is OPEN;
+GitHub push needs `gh auth switch --hostname github.com --user somalvora` first and a switch back to somal-vora_sfemu after).
 The live routing eval has run once: 55/55 model replies, routing 1.0, all 14 gates pass (run log in Open items 3).
 
 Goal: a video recorded by clicking only the suggestion chips, plus a stronger eval harness.
@@ -127,8 +128,8 @@ Goal: a video recorded by clicking only the suggestion chips, plus a stronger ev
 Do, in order:
 1. git fetch; branch new work from origin/main (never from a merged branch); run `uv run python -m pytest tests -q` and
    `uv run python -m household_agent.evals` (expect 14 gates on main, 16 once #30 merges).
-2. If #30 is still open, merge it (resolve the `evals.py` argparse and `EVAL_VERSION` conflict if any) and update counts
-   (16 gates / 416 scenarios) in README, ARCHITECTURE, VIDEO. Keep titles `@W-XXXXXXXX : ...`.
+2. Rebase PR #30 onto origin/main (conflict only in `evals.py` argparse/`EVAL_VERSION`), run the suite, and once the owner merges
+   it update counts (16 gates / 416 scenarios) in README, ARCHITECTURE, VIDEO. Keep titles `@W-XXXXXXXX : ...`.
 3. Next evals: live runs of other areas (retrieval, allocation) only when the owner asks; append each run to the run log.
 4. Refresh HANDOFF.md after each merge.
 Standing rules: no real data in the repo (public); do not dispatch a code-review agent on PRs in this window; do not spend Gemini
