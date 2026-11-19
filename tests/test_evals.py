@@ -95,6 +95,8 @@ def test_cli_writes_the_json_report(tmp_path, capsys):
     data = json.loads(out.read_text())
     assert data["passed"] is True and len(data["gates"]) == 16 and data["counts"]["routing"] == 55
     assert "PASS  unsafe_actions" in capsys.readouterr().out
+    assert data["run"] == {"seed": 0, "as_of": "2026-11-01", "router_model": "keyword rules", "planner_model": "template",
+                           "embed_model": "hash", "only_area": None, "allocation_scenarios": 60}
 
 
 def test_model_persona_generator_keeps_allocation_invariants():

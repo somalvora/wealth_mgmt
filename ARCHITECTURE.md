@@ -19,6 +19,30 @@ The Household Wealth Agent is a local-first multi-agent assistant for household 
  every step: Authorizer (deny by default) and hash-chained AuditLog
 ```
 
+Colors show who owns each step: **green** = model (agent), **gray** = deterministic code, **gold** = a person. 
+
+```mermaid
+flowchart TD
+  A["Question or statement upload<br/>household member"] --> B["Router<br/>model JSON, keyword fallback"]
+  B --> C{"Policy checks<br/>deterministic"}
+  C -->|money movement| R["Refuse and audit the deny<br/>deterministic"]
+  C -->|allocation request| P["Plan candidates and rank<br/>deterministic, model may add shapes"]
+  P --> H["Approve the plan<br/>adult or admin"]
+  C -->|ledger or policy question| D["Ledger Analyst and Policy agents<br/>read via authorized tools"]
+  D --> V["Re-validate every claim against evidence<br/>deterministic"]
+  V --> T{"Variance or data-quality finding?<br/>deterministic"}
+  T -->|yes| W["Review before it ships<br/>adult or admin"]
+  T -->|no| S["Compose draft briefing<br/>deterministic"]
+  W --> S
+  S --> U["Answer with citations<br/>nothing executes"]
+  classDef agent fill:#e7f2ea,stroke:#3d6b4f,color:#1a2e22
+  classDef det fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef human fill:#fff7e0,stroke:#c4a035,color:#5c4a12
+  class B,D agent
+  class C,P,R,V,T,S det
+  class A,H,W human
+```
+
 Layers:
 
 - `household_finance`: pure, deterministic library (no I/O, no floats).
@@ -56,6 +80,27 @@ Layers:
 3. **Reconcile** (tolerance 0 cents). Material: row errors, unsupported currency, invalid period, rows outside the period, opening + rows != closing, credit/debit totals != header, already-ingested row hash. Bounded: identical rows in one file. Info: reversal pairs within 3 days. Any material issue gives `unreconciled`; otherwise any bounded issue gives `qualified`; otherwise `reconciled`. `document_confidence = 0.35*row_parse + 0.25*balance_continuity + 0.10*totals_match + 0.10*duplicate_free + 0.20*mapped_merchant_rate`; below 0.85 the statement is flagged `unverified`.
 4. **Persist.** `LedgerStore.ingest_document` authorizes `upload` on the account, rejects a duplicate `source_hash`, writes document, raw rows and transactions, and audits. The agent's `ingest_statement` tool takes CSV only and only for the host-only `statement_ingestion` purpose, matched by sha256 to the task's own input; PDFs enter through `pipeline.ingest_statement`.
 
+```mermaid
+flowchart TD
+  A["CSV or PDF statement<br/>member upload"] --> B["Parse to ParsedStatement<br/>deterministic, no instructions followed"]
+  B --> C["Categorize by rules<br/>deterministic"]
+  C --> D{"Reconcile, tolerance 0 cents<br/>deterministic"}
+  D -->|material issue| X["unreconciled: figures left out of briefing<br/>deterministic"]
+  D -->|bounded issue| Q["qualified"]
+  D -->|clean| OK["reconciled"]
+  Q --> E{"confidence below 0.85?<br/>deterministic"}
+  OK --> E
+  E -->|yes| UV["flag unverified"]
+  E -->|no| F["Authorize upload, reject duplicate hash<br/>deterministic"]
+  UV --> F
+  F --> G["Append to ledger and audit<br/>deterministic"]
+  classDef agent fill:#e7f2ea,stroke:#3d6b4f,color:#1a2e22
+  classDef det fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef human fill:#fff7e0,stroke:#c4a035,color:#5c4a12
+  class A human
+  class B,C,D,X,Q,OK,E,UV,F,G det
+```
+
 Reading back: `query_transactions` authorizes `read` per account and by default returns only `reconciled` rows with confidence >= 0.85; `include_provisional=True` adds `qualified` and `unverified` rows; `unreconciled` rows are never returned.
 
 ## 4. Calculations
@@ -80,6 +125,29 @@ Authorization rules (`authz_1.0`), first match wins: unknown account, other hous
 
 **Supervisor graph.** `classify` -> one of `refuse`, `plan` / `allocate`, `dispatch` -> `threshold` -> `review` (only with a checkpointer) -> `remind` -> `compose`. Each step is audited under the job's correlation ID.
 
+```mermaid
+flowchart TD
+  A["Request<br/>member"] --> B["classify<br/>Router, keyword fallback"]
+  B -->|money movement| R["refuse: audited deny<br/>deterministic"]
+  B -->|allocation| AL["plan or allocate<br/>deterministic scoring, model proposes"]
+  B -->|questions| D["dispatch: at most 8 items, 300 s<br/>deterministic"]
+  D --> L["Ledger Analyst, at most 6 tool calls<br/>agent"]
+  D --> PO["Policy and Compliance, at most 3 searches<br/>agent"]
+  L --> TH{"threshold<br/>deterministic"}
+  PO --> TH
+  TH -->|"variance over 15 percent or non-completed"| RV["review interrupt<br/>adult or admin of the household"]
+  TH -->|clean| RM["remind: draft .ics, adult approves<br/>deterministic"]
+  RV --> RM
+  RM --> CO["compose: claims re-validated<br/>deterministic"]
+  AL --> AP["approval interrupt<br/>adult or admin"]
+  classDef agent fill:#e7f2ea,stroke:#3d6b4f,color:#1a2e22
+  classDef det fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef human fill:#fff7e0,stroke:#c4a035,color:#5c4a12
+  class B,L,PO agent
+  class R,AL,D,TH,RM,CO det
+  class A,RV,AP human
+```
+
 - **Refusal.** A money-movement request ("pay", "transfer", "wire", ...) ends `refused` with an audited deny and nothing is dispatched. The model can set but not clear the external-action flag (rules and model are OR-ed). In the demo, a question naming a member whose private account the asker cannot read is refused before any model runs, with an audited deny (`DemoService._private_account_refusal`); rent and property-tax questions are about the joint account and are exempt.
 - **Handoffs.** `TaskAssignment` and `AgentResult` are frozen pydantic models carrying the correlation ID, task ID and agent. A result that does not match is discarded as `failed`. A specialist that raises becomes a `failed` result.
 - **Budgets.** At most 8 dispatches and 300 seconds per job; each specialist gets 6 tool calls and 2 retries per tool. Independent plan items run concurrently in a thread pool; dependent items (Policy after Ledger) run alone. After the deadline a per-task cancel event makes later tool calls refuse (`job_cancelled`).
@@ -93,6 +161,27 @@ Authorization rules (`authz_1.0`), first match wins: unknown account, other hous
 ## 7. Planner and approval
 
 `plan_allocation` is a bounded Tree-of-Thought beam search over three tiers (Safety, Tax-advantaged, Growth): 3 thoughts per node, beam of 2, so 3 + 6 + 6 = 15 evaluations (27 at worst when the critic retains discrepancy branches). A thought is a strategy (persona, share, target buckets) and never an amount; `expand_step` converts it to cents. Hard prunes (score 0): statutory cap exceeded, limit unverified, liquidity floor breached, unallocated surplus, wrong tier or bucket. Soft prune below 0.65. Score = 0.40 tax efficiency + 0.35 liquidity safety + 0.25 expected net yield. The optional critic is advisory: a gap over 0.20 retains the branch and sets `needs_review`, but it never prunes. `TemplateThoughtGenerator` is the deterministic default; `LLMThoughtGenerator` / `LLMCritic` sit behind the same protocols, validate model output with pydantic (`extra="forbid"`, no amounts) and fall back per persona to the template, recording each fallback. Plan inputs come from verified statements and recorded calculation runs (`plan_inputs`), never from model numbers, and only from accounts the asker may read.
+
+```mermaid
+flowchart TD
+  A["Allocation request<br/>adult or admin"] --> B["Plan inputs from verified statements<br/>deterministic"]
+  B --> C["Thoughts per tier: Safety, Tax-advantaged, Growth<br/>template, or model persona"]
+  C --> D["Expand to cents and prune<br/>deterministic"]
+  D --> E["Score: 0.40 tax, 0.35 liquidity, 0.25 yield<br/>deterministic"]
+  E --> F["Optional critic, advisory only<br/>agent"]
+  F --> G["Beam of 2, at most 27 evaluations<br/>deterministic"]
+  G --> H["Pause at approval interrupt<br/>deterministic"]
+  H --> I{"Approver an adult or admin?<br/>and input hash unchanged"}
+  I -->|approve| J["Plan marked approved: no money moves<br/>deterministic"]
+  I -->|wrong approver| K["Audited deny, keep waiting<br/>deterministic"]
+  I -->|inputs changed| L["stale<br/>deterministic"]
+  classDef agent fill:#e7f2ea,stroke:#3d6b4f,color:#1a2e22
+  classDef det fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef human fill:#fff7e0,stroke:#c4a035,color:#5c4a12
+  class C,F agent
+  class B,D,E,G,H,J,K,L det
+  class A,I human
+```
 
 **Approval graph** (`approval.py`): `plan` -> `approval` (`interrupt`) with a SQLite checkpoint (its own connection and file). Only an admin or adult of the household can approve (only boolean `True` counts); a wrong approver is audited as a deny and the graph keeps waiting. On resume the input hash is recomputed and a mismatch ends `stale`. A plan has `requires_approval=True` and no execution path: approving moves no money.
 
@@ -116,7 +205,7 @@ Panels: Ask (with 10 suggestion chips), You are, Share my accounts (consent: rea
 
 ## 11. Evaluation harness
 
-`python -m household_agent.evals` runs 420 seeded synthetic scenarios (seed 0) in 12 areas through the real components and scores 16 gates (`EVAL_VERSION = "evals_0.4"`). It exits 1 if a gate fails. Oracles are independent of the code under test.
+`python -m household_agent.evals` runs 420 seeded synthetic scenarios (seed 0) in 12 areas through the real components and scores 16 gates (`EVAL_VERSION = "evals_0.5"`). It exits 1 if a gate fails. Oracles are independent of the code under test.
 
 | Area | Scenarios | Gate(s) |
 |---|---|---|
@@ -133,9 +222,9 @@ Panels: Ask (with 10 suggestion chips), You are, Share my accounts (consent: rea
 | search_count | 27 | `policy_search_count` == 0 violations (repeats collapse, never more than 3 searches) |
 | privacy | 8 | `privacy_canary_exposures` == 0 (and owners see their canary) |
 
-The retrieval area includes 4 negative controls (`retr_neg_*`, labeled expected verdicts: `remove` for a fabricated id, a figure the source lacks, or a wrong-source figure; `rephrase_as_question` for a wrong-source sentence with no figure). They report two advisory metrics, outside the 16 gates: `negative_control_pass` (verdicts match labels) and `fabricated_citations_missed` (scorer disagreements, expected 0); a mismatch is listed under failures as `negative_controls`. `EVAL_VERSION` stays `evals_0.4`: the 22 existing retrieval scenarios are unchanged and the new ones are purely additive (416 to 420 total).
+The retrieval area includes 4 negative controls (`retr_neg_*`, labeled expected verdicts: `remove` for a fabricated id, a figure the source lacks, or a wrong-source figure; `rephrase_as_question` for a wrong-source sentence with no figure). They report two advisory metrics, outside the 16 gates: `negative_control_pass` (verdicts match labels) and `fabricated_citations_missed` (scorer disagreements, expected 0); a mismatch is listed under failures as `negative_controls`. `EVAL_VERSION` is `evals_0.5` because the scenario set grew from 416 to 420; the 22 existing retrieval scenarios are unchanged.
 
-Offline (keyword router, deterministic planner, hash embeddings) all 16 gates pass; the one scenario miss is `retr_005`, where hash embeddings rank the water-heater invoice below 5. With real models, add `--model`, `--planner-model`, `--embed-model` (`ollama:`, `gemini:`, `groq:`); the CLI makes one preflight call per model and exits 2 on failure, aborts early (exit 2) if more than 80% of router or critic calls fall back, and `--only-area` runs one area (the other gates are then vacuous). `--allocation-scenarios N` shrinks the costly allocation set. Live routing can be finished across sittings with `--only-area routing --resume FILE` (`eval_resume`): the checkpoint stores only real model replies, a failed call is never counted and the keyword rules never stand in, exit 3 means paused (run again) and exit 2 means the model or router prompt changed. The report prints only when every request has a model reply. Live run on `gemma-4-26b-a4b-it`: routing 55/55 (accuracy 1.0, schema_validity 1.0, no fallbacks) and all 16 gates pass (see Evaluation notes in README.md).
+Offline (keyword router, deterministic planner, hash embeddings) all 16 gates pass; the one scenario miss is `retr_005`, where hash embeddings rank the water-heater invoice below 5. With real models, add `--model`, `--planner-model`, `--embed-model` (`ollama:`, `gemini:`, `groq:`); the CLI makes one preflight call per model and exits 2 on failure, aborts early (exit 2) if more than 80% of router or critic calls fall back, and `--only-area` runs one area (the other gates are then vacuous). `--allocation-scenarios N` shrinks the costly allocation set. Live routing can be finished across sittings with `--only-area routing --resume FILE` (`eval_resume`): the checkpoint stores only real model replies, a failed call is never counted and the keyword rules never stand in, exit 3 means paused (run again) and exit 2 means the model or router prompt changed. The report prints only when every request has a model reply. Live run on `gemma-4-26b-a4b-it`: routing 55/55 (accuracy 1.0, schema_validity 1.0, no fallbacks) and all 16 gates pass (see Evaluation notes in README.md). Every `--out` report carries a `run` block (seed, fixed clock, router, planner and embedding models, area filter), and saved snapshots live in [`evals/baselines/`](evals/baselines/README.md).
 
 ## 12. Vertical slice (`vertical_slice.py`)
 
