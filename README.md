@@ -134,12 +134,13 @@ Every header field is required. Amounts are signed decimals with at most 2 place
 - A reviewer cannot yet mark a `qualified` statement as confirmed.
 - Contribution-room values are placeholders, not IRS limits; the briefing shows no household net worth.
 - The eval set is template-generated, not human-labeled. Membership inference is not scored. Retrieval numbers use offline hash embeddings.
-- Allocation scenarios and the model planner personas have not been run on a real model.
+- Allocation scenarios and the model planner personas have run on a real model for only 6 of 60 scenarios (see Evaluation notes).
 
 ## Evaluation notes
 
 - **Live routing run** (resumable, `--only-area routing --resume FILE`): 55 held-out requests on `gemma-4-26b-a4b-it`, 55 replies, 0 failed, one sitting of 493 s. Routing accuracy 1.0000 (55/55), schema_validity 1.0000, approval_gating 1.0, unsafe_actions 0, no router fallbacks; all 16 gates pass. Retrieval, allocation and answer quality have only run offline.
 - **Fabricated-citation negative controls:** 4 offline `retr_neg_*` scenarios (never-retrieved id, wrong source, unsupported figure) must get their labeled `remove` / `rephrase_as_question` verdicts, and an independent scorer must flag the invented id. Reported as advisory metrics `negative_control_pass` and `fabricated_citations_missed`, not gates.
-- **Live retrieval run** (`--only-area retrieval --embed-model ollama:nomic-embed-text`): `retrieval_recall_at_5` 1.0000 against 0.9444 with hash embeddings (the `retr_005` miss disappears), citation_precision 1.0000, negative controls pass, no failures. Live allocation (3 scenarios, `gemma-4-26b-a4b-it`): allocation_invariants 1.0, max 9 evaluations, 3 persona thoughts fell back to the template. Answer quality has only run offline.
+- **Live retrieval run** (`--only-area retrieval --embed-model ollama:nomic-embed-text`): `retrieval_recall_at_5` 1.0000 against 0.9444 with hash embeddings (the `retr_005` miss disappears), citation_precision 1.0000, negative controls pass, no failures. Answer quality has only run offline.
+- **Live allocation run** (`--only-area allocation --allocation-scenarios 6 --planner-model gemini:gemma-4-26b-a4b-it`): 6 of 60 scenarios, 13267 s wall clock (Gemini rate-limit waits dominated; one scenario alone took about 15 minutes). allocation_invariants 1.0, max 15 evaluations (limit 27), no scenario failures, all 16 gates pass. 18 persona thoughts fell back to the template after `GoogleAPIError` and 1 of 42 critic calls failed, so some plans came from the deterministic templates and not the model. This shows the model path keeps the invariants, not how good its plans are. The earlier 3-scenario run (864 s, 3 thought fallbacks) is superseded by this one.
 - **Baselines:** saved runs and the settings they pin (seed, clock, models) are in [`evals/baselines/`](evals/baselines/README.md).
 - **Tracing:** no LangSmith, Langfuse or MLflow. The harness is custom, offline and deterministic, with oracles independent of the code under test. `langsmith` appears in `uv.lock` only as a transitive dependency of `langchain-core`, and no tracing environment variables are set.
