@@ -67,6 +67,22 @@ Chip order on the page, left to right, wrapping:
 | 8:00-8:30 | Repo overview | README, `src/`, `tests/`, how to run. |
 | 8:30-9:30 | Strengths, limits and next steps | See the end of this file. |
 
+## Intro slides talk track (about 2.5 minutes, before the live demo)
+
+Seven slides: title, why, agents, architecture, guardrails, tests, "Demo". Say it in your own words; these are prompts.
+
+| Slide | Say (about) |
+|---|---|
+| 1. Household Wealth Agent | "A family asks something like 'why did our property tax go up?' and gets an answer where every number points back to a statement line. It runs locally, it is multi-agent, and all the data is synthetic." (15 s) |
+| 2. Why this project | "Money is high stakes: wrong numbers and leaked data both hurt. Plain language models get arithmetic wrong, invent sources and do not know who may see which account. So the model chooses and explains, and plain code does the math and the permission checks." (25 s) |
+| 3. The agents | "A router picks the request type and flags money movement; keyword rules back it up. A supervisor, which is code, dispatches the work and enforces budgets: at most 8 tasks and 300 seconds. The Ledger Analyst pulls verified transactions and runs calculations. The Policy and Compliance agent retrieves the tax bills, lease and IRS guide with citations. For 'what should we do with our surplus' a planner builds the plan in three steps, Safety, then Tax-advantaged, then Growth. At each step the same model suggests three strategies, conservative, balanced and tax-aggressive, with no dollar amounts. Code turns them into numbers, scores them and keeps the best two, and a critic advises but never prunes. The models never produce the numbers." (30 s) |
+| 4. Architecture | "Green boxes are models, gray is plain code, gold is a person. Most of the diagram is gray. Statements are reconciled to zero cents, meaning opening balance plus transactions must equal the closing balance to the exact cent, before anything uses them. Every claim is re-validated against evidence before it reaches the answer. Allocation plans wait for an adult or admin to approve, and nothing executes." (25 s) |
+| 5. Guardrails | "Access is decided in code before any model touches account data. Money movement is refused and audited. Owners see their own accounts; anyone else needs every owner's consent. Statements with material reconciliation errors are blocked from calculations. Every allow and deny goes into a hash-chained audit log you can verify in the UI. In the demo, Viaan asking about Somal's account is refused, and that refusal is in the audit trail." (25 s) |
+| 6. How I tested it | "420 seeded synthetic scenarios across 12 areas, scored by 16 pass/fail gates. All pass offline. On a real model, routing was 55 of 55, the allocation invariants scored 1.0 over 6 scenarios (some planner thoughts fell back to templates), and retrieval recall at 5 was 1.0 with real embeddings. Negative controls check that an invented citation is caught, and there are 800+ unit and property tests." (25 s) |
+| 7. Demo | "I will click only the suggestion chips, including one where the plan pauses and an adult or admin has to approve it." (10 s) |
+
+If asked about the planner: it is one model asked, once per branch of the plan, for three options, not three agents. The three "viewpoints" are conservative, balanced and tax-aggressive; the three steps (Safety, Tax-advantaged, Growth) are the stages of the plan. The model only suggests strategies (shares and buckets); a template generator is the fallback per viewpoint, and the critic is advisory. Live allocation runs fell back to template thoughts after model API errors (18 in the 6-scenario run) and 1 of 42 critic calls failed; the invariants still held because code enforces them. Offline recall at 5 is 0.9444 (hash embeddings, `retr_005`); with a real embedding model it is 1.0.
+
 ## Demo script (about 3 minutes with warm cache)
 
 Start on the page with "You are" = somal. Two years of statements (Oct 2024 to Sep 2026) and the October 2026 joint rental statement are already on file, so no upload is needed. Say that once: the Documents panel shows them, with "Oct 2026 (latest)" on the newest.
