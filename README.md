@@ -2,6 +2,8 @@
 
 A local-first, multi-agent assistant for household finances. It reads bank statements and reconciles them against their own totals. It answers questions such as *"why did our property tax go up?"* with deterministic, auditable calculations, and every number cites its source line. Each member's private data stays private unless that member gives consent.
 
+**Demo video:** [watch on Google Drive](https://drive.google.com/file/d/1xFgGpJynEUrjP-p3m8aMfIROB6fb7VSi/view?usp=drive_link)
+
 The code-level view is in [ARCHITECTURE.md](ARCHITECTURE.md). Notes for the recorded video are in [VIDEO.md](VIDEO.md).
 
 **Synthetic data only.** The SQLite database is plaintext (no encryption at rest yet). Never commit real statements; `*.db`, `*.sqlite`, `.env` and `.cache/` are git-ignored. Hosted models (Gemini, Groq) must only ever see synthetic data.
